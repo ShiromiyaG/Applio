@@ -292,16 +292,13 @@ def run_extract_script(
     embedder_model: str,
     embedder_model_custom: str = None,
 ):
-    config = get_config()
+
     model_path = os.path.join(logs_path, model_name)
-    pitch_extractor = os.path.join("rvc", "train", "extract", "pitch_extractor.py")
-    embedding_extractor = os.path.join(
-        "rvc", "train", "extract", "embedding_extractor.py"
-    )
+    extract = os.path.join("rvc", "train", "extract", "extract.py")
 
     command_1 = [
         python,
-        pitch_extractor,
+        extract,
         *map(
             str,
             [
@@ -310,26 +307,14 @@ def run_extract_script(
                 hop_length,
                 cpu_cores,
                 gpu,
-            ],
-        ),
-    ]
-
-    command_2 = [
-        python,
-        embedding_extractor,
-        *map(
-            str,
-            [
-                model_path,
                 rvc_version,
-                gpu,
                 embedder_model,
                 embedder_model_custom,
             ],
         ),
     ]
+
     subprocess.run(command_1)
-    subprocess.run(command_2)
 
     generate_config(rvc_version, sample_rate, model_path)
     generate_filelist(pitch_guidance, model_path, rvc_version, sample_rate)
@@ -352,8 +337,8 @@ def run_train_script(
     overtraining_threshold: int,
     pretrained: bool,
     sync_graph: bool,
-    index_algorithm: str,
-    cache_data_in_gpu: bool,
+    index_algorithm: str = "Auto",
+    cache_data_in_gpu: bool = False,
     custom_pretrained: bool = False,
     g_pretrained_path: str = None,
     d_pretrained_path: str = None,
@@ -1252,6 +1237,14 @@ def parse_arguments():
         help="Cache training data in GPU memory.",
         default=False,
     )
+    train_parser.add_argument(
+        "--index_algorithm",
+        type=str,
+        choices=["Auto", "Faiss", "KMeans"],
+        help="Choose the method for generating the index file.",
+        default="Auto",
+        required=False,
+    )
 
     # Parser for 'index' mode
     index_parser = subparsers.add_parser(
@@ -1539,6 +1532,7 @@ def main():
                 pretrained=args.pretrained,
                 custom_pretrained=args.custom_pretrained,
                 sync_graph=args.sync_graph,
+                index_algorithm=args.index_algorithm,
                 cache_data_in_gpu=args.cache_data_in_gpu,
                 g_pretrained_path=args.g_pretrained_path,
                 d_pretrained_path=args.d_pretrained_path,

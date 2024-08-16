@@ -13,7 +13,7 @@ from core import (
 )
 from rvc.configs.config import max_vram_gpu, get_gpu_info, get_number_of_gpus
 from rvc.lib.utils import format_title
-from tabs.settings.restart import restart_applio
+from tabs.settings.restart import stop_train
 
 i18n = I18nAuto()
 now_dir = os.getcwd()
@@ -61,7 +61,7 @@ sup_audioext = {
 
 # Custom Pretraineds
 pretraineds_custom_path = os.path.join(
-    now_dir, "rvc", "pretraineds", "pretraineds_custom"
+    now_dir, "rvc", "models", "pretraineds", "pretraineds_custom"
 )
 
 pretraineds_custom_path_relative = os.path.relpath(pretraineds_custom_path, now_dir)
@@ -729,12 +729,10 @@ def train_tab():
                 api_name="start_training",
             )
 
-            stop_train_button = gr.Button(
-                i18n("Stop Training & Restart Applio"), visible=False
-            )
+            stop_train_button = gr.Button(i18n("Stop Training"), visible=False)
             stop_train_button.click(
-                fn=restart_applio,
-                inputs=[],
+                fn=stop_train,
+                inputs=[model_name],
                 outputs=[],
             )
 

@@ -479,7 +479,7 @@ def inference_tab():
                             choices=list_json_files(PRESETS_DIR),
                             interactive=True,
                         )
-                        refresh_button = gr.Button(i18n("Refresh Presets"))
+                        presets_refresh_button = gr.Button(i18n("Refresh Presets"))
                     import_file = gr.File(
                         label=i18n("Select file to import"),
                         file_count="single",
@@ -491,7 +491,9 @@ def inference_tab():
                         inputs=import_file,
                         outputs=[preset_dropdown],
                     )
-                    refresh_button.click(refresh_presets, outputs=preset_dropdown)
+                    presets_refresh_button.click(
+                        refresh_presets, outputs=preset_dropdown
+                    )
                     with gr.Row():
                         preset_name_input = gr.Textbox(
                             label=i18n("Preset Name"),
@@ -774,7 +776,9 @@ def inference_tab():
                             choices=list_json_files(PRESETS_DIR),
                             interactive=True,
                         )
-                        refresh_button = gr.Button(i18n("Refresh Presets"))
+                        presets_batch_refresh_button = gr.Button(
+                            i18n("Refresh Presets")
+                        )
                     import_file = gr.File(
                         label=i18n("Select file to import"),
                         file_count="single",
@@ -786,7 +790,9 @@ def inference_tab():
                         inputs=import_file,
                         outputs=[preset_dropdown],
                     )
-                    refresh_button.click(refresh_presets, outputs=preset_dropdown)
+                    presets_batch_refresh_button.click(
+                        refresh_presets, outputs=preset_dropdown
+                    )
                     with gr.Row():
                         preset_name_input = gr.Textbox(
                             label=i18n("Preset Name"),

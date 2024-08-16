@@ -18,9 +18,9 @@ now_dir = os.getcwd()
 sys.path.append(now_dir)
 
 platform_stft_mapping = {
-    "linux": "stftpitchshift",
-    "darwin": "stftpitchshift",
-    "win32": "stftpitchshift.exe",
+    "linux": os.path.join(now_dir, "rvc", "models", "formant", "stftpitchshift"),
+    "darwin": os.path.join(now_dir, "rvc", "models", "formant", "stftpitchshift"),
+    "win32": os.path.join(now_dir, "rvc", "models", "formant", "stftpitchshift.exe"),
 }
 
 stft = platform_stft_mapping.get(sys.platform)

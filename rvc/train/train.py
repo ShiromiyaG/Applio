@@ -896,19 +896,21 @@ def train_and_evaluate(
         checkpoint_suffix = (
             f"{global_step if save_only_latest == False else 2333333}.pth"
         )
+        pretrain_dir = os.path.join(now_dir, "logs", "pretrained")
+        os.makedirs(pretrain_dir, exist_ok=True)
         save_checkpoint(
             net_g,
             optim_g,
             config.train.learning_rate,
             epoch,
-            os.path.join(experiment_dir, "G_" + checkpoint_suffix),
+            os.path.join(pretrain_dir, "G_" + checkpoint_suffix),
         )
         save_checkpoint(
             net_d,
             optim_d,
             config.train.learning_rate,
             epoch,
-            os.path.join(experiment_dir, "D_" + checkpoint_suffix),
+            os.path.join(pretrain_dir, "D_" + checkpoint_suffix),
         )
         if rank == 0 and custom_save_every_weights == True:
             if hasattr(net_g, "module"):

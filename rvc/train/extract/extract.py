@@ -295,5 +295,3 @@ if __name__ == "__main__":
     # Run Preparing Files
     generate_config(version, sample_rate, exp_dir)
     generate_filelist(pitch_guidance, exp_dir, version, sample_rate)
-    shutil.rmtree(os.path.join(exp_dir, "sliced_audios"), ignore_errors=True)
-    shutil.rmtree(os.path.join(exp_dir, "sliced_audios_16k"), ignore_errors=True)

@@ -36,7 +36,7 @@ from tabs.settings.model_author import model_author_tab
 # Run prerequisites
 from core import run_prerequisites_script
 
-run_prerequisites_script(False, True, True, True)
+run_prerequisites_script(False, False, True, False)
 
 # Initialize i18n
 from assets.i18n.i18n import I18nAuto

@@ -837,6 +837,7 @@ def train_and_evaluate(
                 config.train.learning_rate,
                 epoch,
                 os.path.join(pretrain_dir, "D_" + checkpoint_suffix),
+            )
             if custom_save_every_weights:
                 model_add.append(
                     os.path.join(

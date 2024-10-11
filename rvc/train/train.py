@@ -822,20 +822,21 @@ def train_and_evaluate(
         # Save weights every N epochs
         if epoch % save_every_epoch == 0:
             checkpoint_suffix = f"{2333333 if save_only_latest else global_step}.pth"
+            pretrain_dir = os.path.join(now_dir, "logs", "pretrained")
+            os.makedirs(pretrain_dir, exist_ok=True)
             save_checkpoint(
                 net_g,
                 optim_g,
                 config.train.learning_rate,
                 epoch,
-                os.path.join(experiment_dir, "G_" + checkpoint_suffix),
+                os.path.join(pretrain_dir, "G_" + checkpoint_suffix),
             )
             save_checkpoint(
                 net_d,
                 optim_d,
                 config.train.learning_rate,
                 epoch,
-                os.path.join(experiment_dir, "D_" + checkpoint_suffix),
-            )
+                os.path.join(pretrain_dir, "D_" + checkpoint_suffix),
             if custom_save_every_weights:
                 model_add.append(
                     os.path.join(

@@ -13,7 +13,6 @@ current_script_directory = os.path.dirname(os.path.realpath(__file__))
 logs_path = os.path.join(current_script_directory, "logs")
 
 from rvc.lib.tools.prerequisites_download import prequisites_download_pipeline
-from rvc.train.process.model_blender import model_blender
 from rvc.train.process.model_information import model_information
 from rvc.lib.tools.analyzer import analyze_audio
 from rvc.lib.tools.launch_tensorboard import launch_tensorboard_pipeline
@@ -23,17 +22,7 @@ python = sys.executable
 
 
 # Get TTS Voices -> https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4
-@lru_cache(maxsize=1)  # Cache only one result since the file is static
-def load_voices_data():
-    with open(
-        os.path.join("rvc", "lib", "tools", "tts_voices.json"), "r", encoding="utf-8"
-    ) as file:
-        return json.load(file)
-
-
-voices_data = load_voices_data()
-locales = list({voice["ShortName"] for voice in voices_data})
-
+# TTS functionality has been removed.
 
 @lru_cache(maxsize=None)
 def import_voice_converter():
@@ -61,54 +50,11 @@ def run_infer_script(
     pth_path: str,
     index_path: str,
     split_audio: bool,
-    f0_autotune: bool,
-    f0_autotune_strength: float,
     proposed_pitch: bool,
     proposed_pitch_threshold: float,
-    clean_audio: bool,
-    clean_strength: float,
     export_format: str,
     embedder_model: str,
     embedder_model_custom: str = None,
-    formant_shifting: bool = False,
-    formant_qfrency: float = 1.0,
-    formant_timbre: float = 1.0,
-    post_process: bool = False,
-    reverb: bool = False,
-    pitch_shift: bool = False,
-    limiter: bool = False,
-    gain: bool = False,
-    distortion: bool = False,
-    chorus: bool = False,
-    bitcrush: bool = False,
-    clipping: bool = False,
-    compressor: bool = False,
-    delay: bool = False,
-    reverb_room_size: float = 0.5,
-    reverb_damping: float = 0.5,
-    reverb_wet_gain: float = 0.5,
-    reverb_dry_gain: float = 0.5,
-    reverb_width: float = 0.5,
-    reverb_freeze_mode: float = 0.5,
-    pitch_shift_semitones: float = 0.0,
-    limiter_threshold: float = -6,
-    limiter_release_time: float = 0.01,
-    gain_db: float = 0.0,
-    distortion_gain: float = 25,
-    chorus_rate: float = 1.0,
-    chorus_depth: float = 0.25,
-    chorus_center_delay: float = 7,
-    chorus_feedback: float = 0.0,
-    chorus_mix: float = 0.5,
-    bitcrush_bit_depth: int = 8,
-    clipping_threshold: float = -6,
-    compressor_threshold: float = 0,
-    compressor_ratio: float = 1,
-    compressor_attack: float = 1.0,
-    compressor_release: float = 100,
-    delay_seconds: float = 0.5,
-    delay_feedback: float = 0.0,
-    delay_mix: float = 0.5,
     sid: int = 0,
 ):
     kwargs = {
@@ -124,54 +70,11 @@ def run_infer_script(
         "pth_path": pth_path,
         "index_path": index_path,
         "split_audio": split_audio,
-        "f0_autotune": f0_autotune,
-        "f0_autotune_strength": f0_autotune_strength,
         "proposed_pitch": proposed_pitch,
         "proposed_pitch_threshold": proposed_pitch_threshold,
-        "clean_audio": clean_audio,
-        "clean_strength": clean_strength,
         "export_format": export_format,
         "embedder_model": embedder_model,
         "embedder_model_custom": embedder_model_custom,
-        "post_process": post_process,
-        "formant_shifting": formant_shifting,
-        "formant_qfrency": formant_qfrency,
-        "formant_timbre": formant_timbre,
-        "reverb": reverb,
-        "pitch_shift": pitch_shift,
-        "limiter": limiter,
-        "gain": gain,
-        "distortion": distortion,
-        "chorus": chorus,
-        "bitcrush": bitcrush,
-        "clipping": clipping,
-        "compressor": compressor,
-        "delay": delay,
-        "reverb_room_size": reverb_room_size,
-        "reverb_damping": reverb_damping,
-        "reverb_wet_level": reverb_wet_gain,
-        "reverb_dry_level": reverb_dry_gain,
-        "reverb_width": reverb_width,
-        "reverb_freeze_mode": reverb_freeze_mode,
-        "pitch_shift_semitones": pitch_shift_semitones,
-        "limiter_threshold": limiter_threshold,
-        "limiter_release": limiter_release_time,
-        "gain_db": gain_db,
-        "distortion_gain": distortion_gain,
-        "chorus_rate": chorus_rate,
-        "chorus_depth": chorus_depth,
-        "chorus_delay": chorus_center_delay,
-        "chorus_feedback": chorus_feedback,
-        "chorus_mix": chorus_mix,
-        "bitcrush_bit_depth": bitcrush_bit_depth,
-        "clipping_threshold": clipping_threshold,
-        "compressor_threshold": compressor_threshold,
-        "compressor_ratio": compressor_ratio,
-        "compressor_attack": compressor_attack,
-        "compressor_release": compressor_release,
-        "delay_seconds": delay_seconds,
-        "delay_feedback": delay_feedback,
-        "delay_mix": delay_mix,
         "sid": sid,
     }
     infer_pipeline = import_voice_converter()
@@ -195,54 +98,11 @@ def run_batch_infer_script(
     pth_path: str,
     index_path: str,
     split_audio: bool,
-    f0_autotune: bool,
-    f0_autotune_strength: float,
     proposed_pitch: bool,
     proposed_pitch_threshold: float,
-    clean_audio: bool,
-    clean_strength: float,
     export_format: str,
     embedder_model: str,
     embedder_model_custom: str = None,
-    formant_shifting: bool = False,
-    formant_qfrency: float = 1.0,
-    formant_timbre: float = 1.0,
-    post_process: bool = False,
-    reverb: bool = False,
-    pitch_shift: bool = False,
-    limiter: bool = False,
-    gain: bool = False,
-    distortion: bool = False,
-    chorus: bool = False,
-    bitcrush: bool = False,
-    clipping: bool = False,
-    compressor: bool = False,
-    delay: bool = False,
-    reverb_room_size: float = 0.5,
-    reverb_damping: float = 0.5,
-    reverb_wet_gain: float = 0.5,
-    reverb_dry_gain: float = 0.5,
-    reverb_width: float = 0.5,
-    reverb_freeze_mode: float = 0.5,
-    pitch_shift_semitones: float = 0.0,
-    limiter_threshold: float = -6,
-    limiter_release_time: float = 0.01,
-    gain_db: float = 0.0,
-    distortion_gain: float = 25,
-    chorus_rate: float = 1.0,
-    chorus_depth: float = 0.25,
-    chorus_center_delay: float = 7,
-    chorus_feedback: float = 0.0,
-    chorus_mix: float = 0.5,
-    bitcrush_bit_depth: int = 8,
-    clipping_threshold: float = -6,
-    compressor_threshold: float = 0,
-    compressor_ratio: float = 1,
-    compressor_attack: float = 1.0,
-    compressor_release: float = 100,
-    delay_seconds: float = 0.5,
-    delay_feedback: float = 0.0,
-    delay_mix: float = 0.5,
     sid: int = 0,
 ):
     kwargs = {
@@ -258,54 +118,11 @@ def run_batch_infer_script(
         "pth_path": pth_path,
         "index_path": index_path,
         "split_audio": split_audio,
-        "f0_autotune": f0_autotune,
-        "f0_autotune_strength": f0_autotune_strength,
         "proposed_pitch": proposed_pitch,
         "proposed_pitch_threshold": proposed_pitch_threshold,
-        "clean_audio": clean_audio,
-        "clean_strength": clean_strength,
         "export_format": export_format,
         "embedder_model": embedder_model,
         "embedder_model_custom": embedder_model_custom,
-        "post_process": post_process,
-        "formant_shifting": formant_shifting,
-        "formant_qfrency": formant_qfrency,
-        "formant_timbre": formant_timbre,
-        "reverb": reverb,
-        "pitch_shift": pitch_shift,
-        "limiter": limiter,
-        "gain": gain,
-        "distortion": distortion,
-        "chorus": chorus,
-        "bitcrush": bitcrush,
-        "clipping": clipping,
-        "compressor": compressor,
-        "delay": delay,
-        "reverb_room_size": reverb_room_size,
-        "reverb_damping": reverb_damping,
-        "reverb_wet_level": reverb_wet_gain,
-        "reverb_dry_level": reverb_dry_gain,
-        "reverb_width": reverb_width,
-        "reverb_freeze_mode": reverb_freeze_mode,
-        "pitch_shift_semitones": pitch_shift_semitones,
-        "limiter_threshold": limiter_threshold,
-        "limiter_release": limiter_release_time,
-        "gain_db": gain_db,
-        "distortion_gain": distortion_gain,
-        "chorus_rate": chorus_rate,
-        "chorus_depth": chorus_depth,
-        "chorus_delay": chorus_center_delay,
-        "chorus_feedback": chorus_feedback,
-        "chorus_mix": chorus_mix,
-        "bitcrush_bit_depth": bitcrush_bit_depth,
-        "clipping_threshold": clipping_threshold,
-        "compressor_threshold": compressor_threshold,
-        "compressor_ratio": compressor_ratio,
-        "compressor_attack": compressor_attack,
-        "compressor_release": compressor_release,
-        "delay_seconds": delay_seconds,
-        "delay_feedback": delay_feedback,
-        "delay_mix": delay_mix,
         "sid": sid,
     }
     infer_pipeline = import_voice_converter()
@@ -314,100 +131,6 @@ def run_batch_infer_script(
     )
 
     return f"Files from {input_folder} inferred successfully."
-
-
-# TTS
-def run_tts_script(
-    tts_file: str,
-    tts_text: str,
-    tts_voice: str,
-    tts_rate: int,
-    pitch: int,
-    index_rate: float,
-    volume_envelope: float,
-    protect: float,
-    f0_method: str,
-    output_tts_path: str,
-    output_rvc_path: str,
-    pth_path: str,
-    index_path: str,
-    split_audio: bool,
-    f0_autotune: bool,
-    f0_autotune_strength: float,
-    proposed_pitch: bool,
-    proposed_pitch_threshold: float,
-    clean_audio: bool,
-    clean_strength: float,
-    export_format: str,
-    embedder_model: str,
-    embedder_model_custom: str = None,
-    sid: int = 0,
-):
-
-    tts_script_path = os.path.join("rvc", "lib", "tools", "tts.py")
-
-    if os.path.exists(output_tts_path) and os.path.abspath(output_tts_path).startswith(
-        os.path.abspath("assets")
-    ):
-        os.remove(output_tts_path)
-
-    command_tts = [
-        *map(
-            str,
-            [
-                python,
-                tts_script_path,
-                tts_file,
-                tts_text,
-                tts_voice,
-                tts_rate,
-                output_tts_path,
-            ],
-        ),
-    ]
-    subprocess.run(command_tts)
-    infer_pipeline = import_voice_converter()
-    infer_pipeline.convert_audio(
-        pitch=pitch,
-        index_rate=index_rate,
-        volume_envelope=volume_envelope,
-        protect=protect,
-        f0_method=f0_method,
-        audio_input_path=output_tts_path,
-        audio_output_path=output_rvc_path,
-        model_path=pth_path,
-        index_path=index_path,
-        split_audio=split_audio,
-        f0_autotune=f0_autotune,
-        f0_autotune_strength=f0_autotune_strength,
-        proposed_pitch=proposed_pitch,
-        proposed_pitch_threshold=proposed_pitch_threshold,
-        clean_audio=clean_audio,
-        clean_strength=clean_strength,
-        export_format=export_format,
-        embedder_model=embedder_model,
-        embedder_model_custom=embedder_model_custom,
-        sid=sid,
-        formant_shifting=None,
-        formant_qfrency=None,
-        formant_timbre=None,
-        post_process=None,
-        reverb=None,
-        pitch_shift=None,
-        limiter=None,
-        gain=None,
-        distortion=None,
-        chorus=None,
-        bitcrush=None,
-        clipping=None,
-        compressor=None,
-        delay=None,
-        sliders=None,
-    )
-
-    return f"Text {tts_text} synthesized successfully.", output_rvc_path.replace(
-        ".wav", f".{export_format.lower()}"
-    )
 
 
 # Preprocess
@@ -573,14 +296,6 @@ def run_index_script(model_name: str, index_algorithm: str):
 def run_model_information_script(pth_path: str):
     print(model_information(pth_path))
     return model_information(pth_path)
-
-
-# Model blender
-def run_model_blender_script(
-    model_name: str, pth_path_1: str, pth_path_2: str, ratio: float
-):
-    message, model_blended = model_blender(model_name, pth_path_1, pth_path_2, ratio)
-    return message, model_blended
 
 
 # Tensorboard
@@ -1622,170 +1337,6 @@ def parse_arguments():
         help=delay_mix_description,
         default=0.5,
         required=False,
-    )
-
-    # Parser for 'tts' mode
-    tts_parser = subparsers.add_parser("tts", help="Run TTS inference")
-    tts_parser.add_argument(
-        "--tts_file", type=str, help="File with a text to be synthesized", required=True
-    )
-    tts_parser.add_argument(
-        "--tts_text", type=str, help="Text to be synthesized", required=True
-    )
-    tts_parser.add_argument(
-        "--tts_voice",
-        type=str,
-        help="Voice to be used for TTS synthesis.",
-        choices=locales,
-        required=True,
-    )
-    tts_parser.add_argument(
-        "--tts_rate",
-        type=int,
-        help="Control the speaking rate of the TTS. Values range from -100 (slower) to 100 (faster).",
-        choices=range(-100, 101),
-        default=0,
-    )
-    tts_parser.add_argument(
-        "--pitch",
-        type=int,
-        help=pitch_description,
-        choices=range(-24, 25),
-        default=0,
-    )
-    tts_parser.add_argument(
-        "--index_rate",
-        type=float,
-        help=index_rate_description,
-        choices=[(i / 10) for i in range(11)],
-        default=0.3,
-    )
-    tts_parser.add_argument(
-        "--volume_envelope",
-        type=float,
-        help=volume_envelope_description,
-        choices=[(i / 10) for i in range(11)],
-        default=1,
-    )
-    tts_parser.add_argument(
-        "--protect",
-        type=float,
-        help=protect_description,
-        choices=[(i / 10) for i in range(6)],
-        default=0.33,
-    )
-    tts_parser.add_argument(
-        "--f0_method",
-        type=str,
-        help=f0_method_description,
-        choices=[
-            "crepe",
-            "crepe-tiny",
-            "rmvpe",
-            "fcpe",
-            "hybrid[crepe+rmvpe]",
-            "hybrid[crepe+fcpe]",
-            "hybrid[rmvpe+fcpe]",
-            "hybrid[crepe+rmvpe+fcpe]",
-        ],
-        default="rmvpe",
-    )
-    tts_parser.add_argument(
-        "--output_tts_path",
-        type=str,
-        help="Full path to save the synthesized TTS audio.",
-        required=True,
-    )
-    tts_parser.add_argument(
-        "--output_rvc_path",
-        type=str,
-        help="Full path to save the voice-converted audio using the synthesized TTS.",
-        required=True,
-    )
-    tts_parser.add_argument(
-        "--pth_path", type=str, help=pth_path_description, required=True
-    )
-    tts_parser.add_argument(
-        "--index_path", type=str, help=index_path_description, required=True
-    )
-    tts_parser.add_argument(
-        "--split_audio",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help=split_audio_description,
-        default=False,
-    )
-    tts_parser.add_argument(
-        "--f0_autotune",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help=f0_autotune_description,
-        default=False,
-    )
-    tts_parser.add_argument(
-        "--f0_autotune_strength",
-        type=float,
-        help=clean_strength_description,
-        choices=[(i / 10) for i in range(11)],
-        default=1.0,
-    )
-    proposed_pitch_description = "Proposed Pitch adjustment"
-    tts_parser.add_argument(
-        "--proposed_pitch",
-        type=bool,
-        help=proposed_pitch_description,
-        choices=[True, False],
-        default=False,
-    )
-    proposed_pitch_threshold_description = "Proposed Pitch adjustment value"
-    tts_parser.add_argument(
-        "--proposed_pitch_threshold",
-        type=float,
-        help=proposed_pitch_threshold_description,
-        choices=[i for i in range(100, 500)],
-        default=155.0,
-    )
-    tts_parser.add_argument(
-        "--clean_audio",
-        type=lambda x: bool(strtobool(x)),
-        choices=[True, False],
-        help=clean_audio_description,
-        default=False,
-    )
-    tts_parser.add_argument(
-        "--clean_strength",
-        type=float,
-        help=clean_strength_description,
-        choices=[(i / 10) for i in range(11)],
-        default=0.7,
-    )
-    tts_parser.add_argument(
-        "--export_format",
-        type=str,
-        help=export_format_description,
-        choices=["WAV", "MP3", "FLAC", "OGG", "M4A"],
-        default="WAV",
-    )
-    tts_parser.add_argument(
-        "--embedder_model",
-        type=str,
-        help=embedder_model_description,
-        choices=[
-            "contentvec",
-            "spin",
-            "spin-v2",
-            "chinese-hubert-base",
-            "japanese-hubert-base",
-            "korean-hubert-base",
-            "custom",
-        ],
-        default="contentvec",
-    )
-    tts_parser.add_argument(
-        "--embedder_model_custom",
-        type=str,
-        help=embedder_model_custom_description,
-        default=None,
     )
 
     # Parser for 'preprocess' mode

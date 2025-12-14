@@ -8,20 +8,6 @@ import logging
 import traceback
 import numpy as np
 import soundfile as sf
-import noisereduce as nr
-from pedalboard import (
-    Pedalboard,
-    Chorus,
-    Distortion,
-    Reverb,
-    PitchShift,
-    Limiter,
-    Gain,
-    Bitcrush,
-    Clipping,
-    Compressor,
-    Delay,
-)
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -74,25 +60,6 @@ class VoiceConverter:
         self.hubert_model.eval()
 
     @staticmethod
-    def remove_audio_noise(data, sr, reduction_strength=0.7):
-        """
-        Removes noise from an audio file using the NoiseReduce library.
-
-        Args:
-            data (numpy.ndarray): The audio data as a NumPy array.
-            sr (int): The sample rate of the audio data.
-            reduction_strength (float): Strength of the noise reduction. Default is 0.7.
-        """
-        try:
-            reduced_noise = nr.reduce_noise(
-                y=data, sr=sr, prop_decrease=reduction_strength
-            )
-            return reduced_noise
-        except Exception as error:
-            print(f"An error occurred removing audio noise: {error}")
-            return None
-
-    @staticmethod
     def convert_audio_format(input_path, output_path, output_format):
         """
         Converts an audio file to a specified output format.
@@ -126,70 +93,6 @@ class VoiceConverter:
         except Exception as error:
             print(f"An error occurred converting the audio format: {error}")
 
-    @staticmethod
-    def post_process_audio(
-        audio_input,
-        sample_rate,
-        **kwargs,
-    ):
-        board = Pedalboard()
-        if kwargs.get("reverb", False):
-            reverb = Reverb(
-                room_size=kwargs.get("reverb_room_size", 0.5),
-                damping=kwargs.get("reverb_damping", 0.5),
-                wet_level=kwargs.get("reverb_wet_level", 0.33),
-                dry_level=kwargs.get("reverb_dry_level", 0.4),
-                width=kwargs.get("reverb_width", 1.0),
-                freeze_mode=kwargs.get("reverb_freeze_mode", 0),
-            )
-            board.append(reverb)
-        if kwargs.get("pitch_shift", False):
-            pitch_shift = PitchShift(semitones=kwargs.get("pitch_shift_semitones", 0))
-            board.append(pitch_shift)
-        if kwargs.get("limiter", False):
-            limiter = Limiter(
-                threshold_db=kwargs.get("limiter_threshold", -6),
-                release_ms=kwargs.get("limiter_release", 0.05),
-            )
-            board.append(limiter)
-        if kwargs.get("gain", False):
-            gain = Gain(gain_db=kwargs.get("gain_db", 0))
-            board.append(gain)
-        if kwargs.get("distortion", False):
-            distortion = Distortion(drive_db=kwargs.get("distortion_gain", 25))
-            board.append(distortion)
-        if kwargs.get("chorus", False):
-            chorus = Chorus(
-                rate_hz=kwargs.get("chorus_rate", 1.0),
-                depth=kwargs.get("chorus_depth", 0.25),
-                centre_delay_ms=kwargs.get("chorus_delay", 7),
-                feedback=kwargs.get("chorus_feedback", 0.0),
-                mix=kwargs.get("chorus_mix", 0.5),
-            )
-            board.append(chorus)
-        if kwargs.get("bitcrush", False):
-            bitcrush = Bitcrush(bit_depth=kwargs.get("bitcrush_bit_depth", 8))
-            board.append(bitcrush)
-        if kwargs.get("clipping", False):
-            clipping = Clipping(threshold_db=kwargs.get("clipping_threshold", 0))
-            board.append(clipping)
-        if kwargs.get("compressor", False):
-            compressor = Compressor(
-                threshold_db=kwargs.get("compressor_threshold", 0),
-                ratio=kwargs.get("compressor_ratio", 1),
-                attack_ms=kwargs.get("compressor_attack", 1.0),
-                release_ms=kwargs.get("compressor_release", 100),
-            )
-            board.append(compressor)
-        if kwargs.get("delay", False):
-            delay = Delay(
-                delay_seconds=kwargs.get("delay_seconds", 0.5),
-                feedback=kwargs.get("delay_feedback", 0.0),
-                mix=kwargs.get("delay_mix", 0.5),
-            )
-            board.append(delay)
-        return board(audio_input, sample_rate)
-
     def convert_audio(
         self,
         audio_input_path: str,
@@ -203,14 +106,9 @@ class VoiceConverter:
         protect: float = 0.5,
         hop_length: int = 128,
         split_audio: bool = False,
-        f0_autotune: bool = False,
-        f0_autotune_strength: float = 1,
         embedder_model: str = "contentvec",
         embedder_model_custom: str = None,
-        clean_audio: bool = False,
-        clean_strength: float = 0.5,
         export_format: str = "WAV",
-        post_process: bool = False,
         resample_sr: int = 0,
         sid: int = 0,
         proposed_pitch: bool = False,
@@ -232,9 +130,6 @@ class VoiceConverter:
             model_path (str): Path to the voice conversion model.
             index_path (str): Path to the index file.
             split_audio (bool): Whether to split the audio for processing.
-            f0_autotune (bool): Whether to use F0 autotune.
-            clean_audio (bool): Whether to clean the audio.
-            clean_strength (float): Strength of the audio cleaning.
             export_format (str): Format for exporting the audio.
             f0_file (str): Path to the F0 file.
             embedder_model (str): Path to the embedder model.
@@ -270,7 +165,7 @@ class VoiceConverter:
             file_index = (
                 index_path.strip()
                 .strip('"')
-                .strip("\n")
+                .strip('\n')
                 .strip('"')
                 .strip()
                 .replace("trained", "added")
@@ -301,8 +196,6 @@ class VoiceConverter:
                     volume_envelope=volume_envelope,
                     version=self.version,
                     protect=protect,
-                    f0_autotune=f0_autotune,
-                    f0_autotune_strength=f0_autotune_strength,
                     proposed_pitch=proposed_pitch,
                     proposed_pitch_threshold=proposed_pitch_threshold,
                 )
@@ -316,20 +209,6 @@ class VoiceConverter:
                 )
             else:
                 audio_opt = converted_chunks[0]
-
-            if clean_audio:
-                cleaned_audio = self.remove_audio_noise(
-                    audio_opt, self.tgt_sr, clean_strength
-                )
-                if cleaned_audio is not None:
-                    audio_opt = cleaned_audio
-
-            if post_process:
-                audio_opt = self.post_process_audio(
-                    audio_input=audio_opt,
-                    sample_rate=self.tgt_sr,
-                    **kwargs,
-                )
 
             sf.write(audio_output_path, audio_opt, self.tgt_sr, format="WAV")
             output_path_format = audio_output_path.replace(

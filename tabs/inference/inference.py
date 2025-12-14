@@ -66,10 +66,8 @@ INDEX_FOLDER = re.compile(r"^(?:ind.{0,4}|idx(?:s)?)$")
 def is_mdl_alias(name: str) -> bool:
     return bool(MODEL_FOLDER.match(name))
 
-
 def is_idx_alias(name: str) -> bool:
     return bool(INDEX_FOLDER.match(name))
-
 
 def alias_score(path: str, want_model: bool) -> int:
     """
@@ -85,7 +83,6 @@ def alias_score(path: str, want_model: bool) -> int:
         return 2 if has_mdl else (1 if has_idx else 0)
     else:
         return 2 if has_idx else (1 if has_mdl else 0)
-
 
 def get_files(type="model"):
     assert type in ("model", "index"), "Invalid type for get_files (models or index)"
@@ -123,7 +120,6 @@ def get_files(type="model"):
 
     return [t[2] for t in sorted(best.values(), key=lambda x: x[1])]
 
-
 default_weight = next(iter(get_files("model")), None)
 
 audio_paths = [
@@ -154,7 +150,6 @@ def update_sliders(preset):
         values["protect"],
     )
 
-
 def update_sliders_formant(preset):
     with open(
         os.path.join(FORMANTSHIFT_DIR, f"{preset}.json"), "r", encoding="utf-8"
@@ -165,17 +160,14 @@ def update_sliders_formant(preset):
         values["formant_timbre"],
     )
 
-
 def export_presets(presets, file_path):
     with open(file_path, "w", encoding="utf-8") as json_file:
         json.dump(presets, json_file, ensure_ascii=False, indent=4)
-
 
 def import_presets(file_path):
     with open(file_path, "r", encoding="utf-8") as json_file:
         presets = json.load(json_file)
     return presets
-
 
 def get_presets_data(pitch, index_rate, rms_mix_rate, protect):
     return {
@@ -185,7 +177,6 @@ def get_presets_data(pitch, index_rate, rms_mix_rate, protect):
         "protect": protect,
     }
 
-
 def export_presets_button(preset_name, pitch, index_rate, rms_mix_rate, protect):
     if preset_name:
         file_path = os.path.join(PRESETS_DIR, f"{preset_name}.json")
@@ -194,7 +185,6 @@ def export_presets_button(preset_name, pitch, index_rate, rms_mix_rate, protect)
             json.dump(presets_data, json_file, ensure_ascii=False, indent=4)
         return "Export successful"
     return "Export cancelled"
-
 
 def import_presets_button(file_path):
     if file_path:
@@ -206,15 +196,12 @@ def import_presets_button(file_path):
         )
     return [], {}, "No file selected for import."
 
-
 def list_json_files(directory):
     return [f.rsplit(".", 1)[0] for f in os.listdir(directory) if f.endswith(".json")]
-
 
 def refresh_presets():
     json_files = list_json_files(PRESETS_DIR)
     return gr.update(choices=json_files)
-
 
 def output_path_fn(input_audio_path):
     original_name_without_extension = os.path.basename(input_audio_path).rsplit(".", 1)[
@@ -223,7 +210,6 @@ def output_path_fn(input_audio_path):
     new_name = original_name_without_extension + "_output.wav"
     output_path = os.path.join(os.path.dirname(input_audio_path), new_name)
     return output_path
-
 
 def change_choices(model):
     if model:
@@ -265,7 +251,6 @@ def change_choices(model):
         },
     )
 
-
 def extract_model_and_epoch(path):
     base_name = os.path.basename(path)
     match = re.match(r"(.+?)_(\d+)e_", base_name)
@@ -273,7 +258,6 @@ def extract_model_and_epoch(path):
         model, epoch = match.groups()
         return model, int(epoch)
     return "", 0
-
 
 def save_to_wav(record_button):
     if record_button is None:
@@ -286,7 +270,6 @@ def save_to_wav(record_button):
         shutil.move(path_to_file, target_path)
         return target_path, output_path_fn(target_path)
 
-
 def save_to_wav2(upload_audio):
     file_path = upload_audio
     formated_name = format_title(os.path.basename(file_path))
@@ -298,7 +281,6 @@ def save_to_wav2(upload_audio):
     shutil.copy(file_path, target_path)
     return target_path, output_path_fn(target_path)
 
-
 def delete_outputs():
     gr.Info(f"Outputs cleared!")
     for root, _, files in os.walk(audio_root_relative, topdown=False):
@@ -306,9 +288,9 @@ def delete_outputs():
             if name.endswith(tuple(sup_audioext)) and name.__contains__("_output"):
                 os.remove(os.path.join(root, name))
 
-
 def folders_same(
-    a: str, b: str
+    a: str,
+    b: str,
 ) -> bool:  # Used to "pair" index and model folders based on path names
     """
     True if:
@@ -344,7 +326,6 @@ def folders_same(
         return True
     return False
 
-
 def match_index(model_file_value):
     if not model_file_value:
         return ""
@@ -353,8 +334,8 @@ def match_index(model_file_value):
     model_folder = normalize_path(os.path.dirname(model_file_value))
     model_name = os.path.basename(model_file_value)
     base_name = os.path.splitext(model_name)[0]
-    common = re.sub(r"[_\-\.\+](?:e|s|v|V)\d.*$", "", base_name)
-    prefix_match = re.match(r"^(.*?)[_\-\.\+]", base_name)
+    common = re.sub(r"[_\-+\.] (?:e|s|v|V)\d.*$", "", base_name)
+    prefix_match = re.match(r"^(.*?)[_\-+\.]", base_name)
     prefix = prefix_match.group(1) if prefix_match else None
 
     same_count = 0
@@ -421,7 +402,6 @@ def match_index(model_file_value):
 
     return ""
 
-
 def create_folder_and_move_files(folder_name, bin_file, config_file):
     if not folder_name:
         return "Folder name must not be empty."
@@ -443,16 +423,14 @@ def create_folder_and_move_files(folder_name, bin_file, config_file):
         shutil.copy(bin_file, os.path.join(target_folder, os.path.basename(bin_file)))
     if config_file:
         shutil.copy(
-            config_file, os.path.join(target_folder, os.path.basename(config_file))
-        )
+            config_file,
+            os.path.join(target_folder, os.path.basename(config_file)))
 
     return f"Files moved to folder {target_folder}"
-
 
 def refresh_formant():
     json_files = list_json_files(FORMANTSHIFT_DIR)
     return gr.update(choices=json_files)
-
 
 def refresh_embedders_folders():
     custom_embedders = [
@@ -461,7 +439,6 @@ def refresh_embedders_folders():
         for dirname in dirnames
     ]
     return custom_embedders
-
 
 def get_speakers_id(model):
     if model:
@@ -479,7 +456,6 @@ def get_speakers_id(model):
     else:
         return [0]
 
-
 def filter_dropdowns(filter_text):
     ft = filter_text.lower()
     all_models = sorted(get_files("model"), key=extract_model_and_epoch)
@@ -487,7 +463,6 @@ def filter_dropdowns(filter_text):
     filtered_models = [m for m in all_models if ft in m.lower()]
     filtered_indexes = [i for i in all_indexes if ft in i.lower()]
     return (gr.update(choices=filtered_models), gr.update(choices=filtered_indexes))
-
 
 def update_filter_visibility(_):
     en = load_config_filter()
@@ -2202,54 +2177,11 @@ def inference_tab():
             model_file,
             index_file,
             split_audio,
-            autotune,
-            autotune_strength,
             proposed_pitch,
             proposed_pitch_threshold,
-            clean_audio,
-            clean_strength,
             export_format,
             embedder_model,
             embedder_model_custom,
-            formant_shifting,
-            formant_qfrency,
-            formant_timbre,
-            post_process,
-            reverb,
-            pitch_shift,
-            limiter,
-            gain,
-            distortion,
-            chorus,
-            bitcrush,
-            clipping,
-            compressor,
-            delay,
-            reverb_room_size,
-            reverb_damping,
-            reverb_wet_gain,
-            reverb_dry_gain,
-            reverb_width,
-            reverb_freeze_mode,
-            pitch_shift_semitones,
-            limiter_threshold,
-            limiter_release_time,
-            gain_db,
-            distortion_gain,
-            chorus_rate,
-            chorus_depth,
-            chorus_center_delay,
-            chorus_feedback,
-            chorus_mix,
-            bitcrush_bit_depth,
-            clipping_threshold,
-            compressor_threshold,
-            compressor_ratio,
-            compressor_attack,
-            compressor_release,
-            delay_seconds,
-            delay_feedback,
-            delay_mix,
             sid,
         ],
         outputs=[vc_output1, vc_output2],
@@ -2268,54 +2200,11 @@ def inference_tab():
             model_file,
             index_file,
             split_audio_batch,
-            autotune_batch,
-            autotune_strength_batch,
             proposed_pitch_batch,
             proposed_pitch_threshold_batch,
-            clean_audio_batch,
-            clean_strength_batch,
             export_format_batch,
             embedder_model_batch,
             embedder_model_custom_batch,
-            formant_shifting_batch,
-            formant_qfrency_batch,
-            formant_timbre_batch,
-            post_process_batch,
-            reverb_batch,
-            pitch_shift_batch,
-            limiter_batch,
-            gain_batch,
-            distortion_batch,
-            chorus_batch,
-            bitcrush_batch,
-            clipping_batch,
-            compressor_batch,
-            delay_batch,
-            reverb_room_size_batch,
-            reverb_damping_batch,
-            reverb_wet_gain_batch,
-            reverb_dry_gain_batch,
-            reverb_width_batch,
-            reverb_freeze_mode_batch,
-            pitch_shift_semitones_batch,
-            limiter_threshold_batch,
-            limiter_release_time_batch,
-            gain_db_batch,
-            distortion_gain_batch,
-            chorus_rate_batch,
-            chorus_depth_batch,
-            chorus_center_delay_batch,
-            chorus_feedback_batch,
-            chorus_mix_batch,
-            bitcrush_bit_depth_batch,
-            clipping_threshold_batch,
-            compressor_threshold_batch,
-            compressor_ratio_batch,
-            compressor_attack_batch,
-            compressor_release_batch,
-            delay_seconds_batch,
-            delay_feedback_batch,
-            delay_mix_batch,
             sid_batch,
         ],
         outputs=[vc_output3],

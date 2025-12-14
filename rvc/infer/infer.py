@@ -5,9 +5,10 @@ import time
 import torch
 import librosa
 import logging
+import subprocess
 import traceback
 import numpy as np
-import soundfile as sf
+import torchaudio
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -59,39 +60,44 @@ class VoiceConverter:
         self.hubert_model = self.hubert_model.to(self.config.device).float()
         self.hubert_model.eval()
 
-    @staticmethod
-    def convert_audio_format(input_path, output_path, output_format):
+    def save_audio(self, audio, sample_rate, output_path, output_format):
         """
-        Converts an audio file to a specified output format.
-
-        Args:
-            input_path (str): Path to the input audio file.
-            output_path (str): Path to the output audio file.
-            output_format (str): Desired audio format (e.g., "WAV", "MP3").
+        Saves the audio. Uses torchaudio for WAV, and ffmpeg (via subprocess) for others to avoid soundfile/libsndfile crashes.
         """
         try:
-            if output_format != "WAV":
-                print(f"Saving audio as {output_format}...")
-                audio, sample_rate = librosa.load(input_path, sr=None)
-                common_sample_rates = [
-                    8000,
-                    11025,
-                    12000,
-                    16000,
-                    22050,
-                    24000,
-                    32000,
-                    44100,
-                    48000,
-                ]
-                target_sr = min(common_sample_rates, key=lambda x: abs(x - sample_rate))
-                audio = librosa.resample(
-                    audio, orig_sr=sample_rate, target_sr=target_sr, res_type="soxr_vhq"
-                )
-                sf.write(output_path, audio, target_sr, format=output_format.lower())
+            if np.isnan(audio).any() or np.isinf(audio).any():
+                audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+
+            output_format = output_format.upper()
+            
+            # Prepare for torchaudio
+            audio_tensor = torch.from_numpy(audio).float()
+            if audio_tensor.ndim == 1:
+                audio_tensor = audio_tensor.unsqueeze(0)
+            elif audio_tensor.ndim == 2:
+                 if audio_tensor.shape[0] > audio_tensor.shape[1]:
+                     audio_tensor = audio_tensor.t()
+
+            if output_format == "WAV":
+                torchaudio.save(output_path, audio_tensor, sample_rate, format="wav")
+            else:
+                # Save as temporary WAV first
+                temp_wav = output_path + ".temp.wav"
+                torchaudio.save(temp_wav, audio_tensor, sample_rate, format="wav")
+                
+                # Convert to target format using ffmpeg
+                command = ["ffmpeg", "-y", "-i", temp_wav, output_path]
+                
+                subprocess.run(command, capture_output=True)
+                
+                # Clean up temp file
+                if os.path.exists(temp_wav):
+                    os.remove(temp_wav)
+
             return output_path
         except Exception as error:
-            print(f"An error occurred converting the audio format: {error}")
+            print(f"An error occurred saving the audio: {error}")
+            print(traceback.format_exc())
 
     def convert_audio(
         self,
@@ -210,12 +216,11 @@ class VoiceConverter:
             else:
                 audio_opt = converted_chunks[0]
 
-            sf.write(audio_output_path, audio_opt, self.tgt_sr, format="WAV")
             output_path_format = audio_output_path.replace(
                 ".wav", f".{export_format.lower()}"
             )
-            audio_output_path = self.convert_audio_format(
-                audio_output_path, output_path_format, export_format
+            audio_output_path = self.save_audio(
+                audio_opt, self.tgt_sr, output_path_format, export_format
             )
 
             elapsed_time = time.time() - start_time

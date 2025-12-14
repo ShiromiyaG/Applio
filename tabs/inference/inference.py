@@ -335,7 +335,7 @@ def match_index(model_file_value):
     model_name = os.path.basename(model_file_value)
     base_name = os.path.splitext(model_name)[0]
     common = re.sub(r"[_\-+\.] (?:e|s|v|V)\d.*$", "", base_name)
-    prefix_match = re.match(r"^(.*?)[_\-+\.]", base_name)
+    prefix_match = re.match(r"^(.*?)[_\-+\"]", base_name)
     prefix = prefix_match.group(1) if prefix_match else None
 
     same_count = 0

@@ -6,7 +6,6 @@ import soundfile as sf
 import numpy as np
 import re
 import unicodedata
-import wget
 from torch import nn
 
 import logging
@@ -104,6 +103,7 @@ def format_title(title):
 
 
 def load_embedding(embedder_model, custom_embedder=None):
+    import wget
     embedder_root = os.path.join(now_dir, "rvc", "models", "embedders")
     embedding_list = {
         "contentvec": os.path.join(embedder_root, "contentvec"),

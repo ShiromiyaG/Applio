@@ -1,11 +1,11 @@
 import time
 import logging
-from tensorboard import program
 
 log_path = "logs"
 
 
 def launch_tensorboard_pipeline():
+    from tensorboard import program
     logging.getLogger("root").setLevel(logging.WARNING)
     logging.getLogger("tensorboard").setLevel(logging.WARNING)
 

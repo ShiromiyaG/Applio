@@ -377,7 +377,9 @@ class Pipeline:
     def _retrieve_speaker_embeddings(self, feats, index, big_npy, index_rate):
         npy = feats[0].cpu().numpy()
         score, ix = index.search(npy, k=8)
-        weight = np.square(1 / score)
+        # a frame that exactly matches an indexed one scores 0, and 1/0 would
+        # turn the whole frame into NaN once the weights are normalized
+        weight = np.square(1 / np.maximum(score, 1e-8))
         weight /= weight.sum(axis=1, keepdims=True)
         npy = np.sum(big_npy[ix] * np.expand_dims(weight, axis=2), axis=1)
         feats = (
@@ -429,6 +431,13 @@ class Pipeline:
         if file_index != "" and os.path.exists(file_index) and index_rate > 0:
             try:
                 index = faiss.read_index(file_index)
+                # indexes are written with nprobe=1, which only searches a
+                # single Voronoi cell and returns barely half of the true
+                # nearest neighbours. Raising it here also repairs indexes
+                # built before this was fixed. Non-IVF indexes have no nprobe
+                # and must be left alone rather than disabled.
+                if hasattr(index, "nprobe"):
+                    index.nprobe = max(index.nprobe, 12)
                 big_npy = index.reconstruct_n(0, index.ntotal)
             except Exception as error:
                 print(f"An error occurred reading the FAISS index: {error}")

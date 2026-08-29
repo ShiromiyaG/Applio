@@ -471,7 +471,9 @@ class Realtime_Pipeline:
         skip_offset = skip_head // 2
         tsr = feats[0][skip_offset:]
         score, ix = index.search(tsr, k=8)
-        weight = (1 / score).square()
+        # a frame that exactly matches an indexed one scores 0, and 1/0 would
+        # turn the whole frame into NaN once the weights are normalized
+        weight = (1 / score.clamp_min(1e-8)).square()
         weight /= weight.sum(dim=1, keepdim=True)
         query = (big_tsr[ix] * weight.unsqueeze(2)).sum(dim=1)
 

@@ -40,7 +40,8 @@ else:
         )
         sys.exit(1)
 
-    big_npy = np.concatenate(npys, axis=0)
+    # features may be float16 on disk, but faiss requires float32
+    big_npy = np.concatenate(npys, axis=0).astype(np.float32)
 
     big_npy_idx = np.arange(big_npy.shape[0])
     np.random.shuffle(big_npy_idx)
@@ -64,7 +65,11 @@ else:
     # index_added
     index_added = faiss.index_factory(768, f"IVF{n_ivf},Flat")
     index_ivf_added = faiss.extract_index_ivf(index_added)
-    index_ivf_added.nprobe = 1
+    # nprobe is serialized with the index and is what inference searches with.
+    # At 1 only a single Voronoi cell is visited, which returns roughly half of
+    # the true nearest neighbours; 12 recovers ~96% for a negligible cost, and
+    # matches the default the realtime pipeline already uses.
+    index_ivf_added.nprobe = 12
     index_added.train(big_npy)
 
     batch_size_add = 8192

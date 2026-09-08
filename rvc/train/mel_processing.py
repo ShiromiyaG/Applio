@@ -1,5 +1,7 @@
+import numpy as np
 import torch
 import torch.utils.data
+from librosa import mel_frequencies
 from librosa.filters import mel as librosa_mel_fn
 
 mel_basis = {}
@@ -210,6 +212,101 @@ class MultiScaleMelSpectrogramLoss(torch.nn.Module):
         return loss * self.output_scale
 
 
+def mel_frequency_tilt_weights(
+    num_mels: int,
+    sample_rate: int,
+    tilt: float = 0.0,
+    max_ratio: float = 8.0,
+):
+    """
+    Per-bin weights that undo part of the mel scale's own bin density.
+
+    An L1 over log-mel gives every bin the same gradient magnitude, so a region
+    receives the share of the objective that it holds in *bins*, not in
+    spectrum and not in how wrong it is. The mel scale puts those bins at the
+    bottom: over 0-16 kHz, 0-2 kHz is 12.5% of the spectrum and 45% of the
+    bins, 10-16 kHz is 37.5% and 12%. The split is the same at 40, 80, 160,
+    320 and 640 bands, so no choice of scale set moves it.
+
+    Each bin is weighted by its own bandwidth raised to ``tilt``: 0.0 is the
+    unweighted loss, 1.0 cancels the warping and every hertz pulls equally.
+    The penalty for one and the same -6 dB shelf, normalised per column to its
+    1-3 kHz value, on the RefineGAN2 set at 32 kHz:
+
+        shelf at     tilt 0   tilt 0.5   tilt 1.0
+        1-3 kHz       1.000     1.000      1.000
+        6-10 kHz      0.458     0.964      1.849
+        10-13 kHz     0.232     0.591      0.993
+        13-16 kHz     0.155     0.443      0.666
+
+    1.0 overshoots -- 6-10 kHz ends up charging more than 1-3 kHz, its bands
+    being the wide ones -- so 0.5 is what ``build_refinegan2_mel_loss`` uses.
+
+    Normalised to a mean of 1, so the weighting changes which bins are heard
+    and not the scale of the term.
+
+    Args:
+        num_mels (int): Mel bands the weights are built for.
+        sample_rate (int): Sample rate of the waveforms, in Hz.
+        tilt (float, optional): 0.0 is off, 1.0 is one weight per hertz. Defaults to 0.0.
+        max_ratio (float, optional): Cap on the spread between the extremes, without
+            which the bottom bins are tens of hertz wide and take weights near zero.
+            Defaults to 8.0.
+    """
+
+    if tilt == 0.0:
+        return torch.ones(int(num_mels), dtype=torch.float32)
+
+    # ``+2`` and the trim are how ``librosa.filters.mel`` places centres, and
+    # the untrimmed array gives the end bins a neighbour to measure against.
+    edges = mel_frequencies(
+        n_mels=int(num_mels) + 2, fmin=0.0, fmax=sample_rate / 2, htk=False
+    )
+    # A triangular mel filter spans its two neighbouring centres, so this is
+    # the filter's own width.
+    weights = np.maximum(edges[2:] - edges[:-2], 1e-6) ** float(tilt)
+    # Clipped around the geometric mean, the weights living in a log domain.
+    centre = float(np.exp(np.log(weights).mean()))
+    limit = float(max_ratio) ** 0.5
+    weights = np.clip(weights, centre / limit, centre * limit)
+    return torch.from_numpy((weights / weights.mean()).astype(np.float32))
+
+
+class BandWeightedL1Loss(torch.nn.Module):
+    """
+    Mel L1 whose reduction is weighted per bin rather than uniform.
+
+    The weights are rebuilt per resolution, since the multi-scale loss hands
+    the same distance 40 to 640 bands and the weighting is defined by
+    frequency rather than by bin count.
+
+    Args:
+        sample_rate (int): Sample rate of the waveforms, in Hz.
+        tilt (float): Passed to ``mel_frequency_tilt_weights``.
+        max_ratio (float, optional): Passed to ``mel_frequency_tilt_weights``. Defaults to 8.0.
+    """
+
+    def __init__(self, sample_rate: int, tilt: float, max_ratio: float = 8.0):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.tilt = float(tilt)
+        self.max_ratio = float(max_ratio)
+        self.weights: dict[str, torch.Tensor] = {}
+
+    def forward(self, real: torch.Tensor, fake: torch.Tensor):
+        bins = real.shape[-2]
+        key = f"{bins}_{real.dtype}_{real.device}"
+        if key not in self.weights:
+            self.weights[key] = (
+                mel_frequency_tilt_weights(
+                    bins, self.sample_rate, self.tilt, self.max_ratio
+                )
+                .reshape(1, -1, 1)
+                .to(device=real.device, dtype=real.dtype)
+            )
+        return ((real - fake).abs() * self.weights[key]).mean()
+
+
 # RefineGAN2's scale set, which is not RefineGAN's.
 #
 # The coarse end of the default set (32/64/128) charges almost nothing for a
@@ -233,6 +330,12 @@ REFINEGAN2_MEL_WINDOWS = [256, 512, 1024, 2048, 4096]
 # site that forgot it would train at more than twice the intended mel weight.
 REFINEGAN2_MEL_DIVISOR = 2.20
 
+# How far the band weighting undoes the mel scale's bin density. 0.5 roughly
+# triples what the bands above 10 kHz charge without reordering them; the loss
+# value on a real generated/reference pair moves about 10%, which is the part
+# that reaches anything reading the mel term's scale.
+REFINEGAN2_MEL_TILT = 0.5
+
 
 def build_refinegan2_mel_loss(sample_rate: int, loss_fn=None):
     """
@@ -241,11 +344,19 @@ def build_refinegan2_mel_loss(sample_rate: int, loss_fn=None):
     Weighted with the same ``c_mel`` the single-scale L1 uses, so unlike
     RefineGAN's set it needs no divisor at the call site.
 
+    The distance is band-weighted by default. The scale set flattens the loss
+    across frequency only relative to the single-scale L1; what is left is the
+    mel warping itself, which the scale set cannot reach -- see
+    ``mel_frequency_tilt_weights``.
+
     Args:
         sample_rate (int): Sample rate of the waveforms, in Hz.
-        loss_fn (optional): Distance between the two log-mels. Defaults to ``torch.nn.L1Loss()``.
+        loss_fn (optional): Distance between the two log-mels. Defaults to a
+            ``BandWeightedL1Loss`` at ``REFINEGAN2_MEL_TILT``.
     """
 
+    if loss_fn is None:
+        loss_fn = BandWeightedL1Loss(sample_rate, REFINEGAN2_MEL_TILT)
     return MultiScaleMelSpectrogramLoss(
         sample_rate=sample_rate,
         n_mels=REFINEGAN2_MEL_N_MELS,

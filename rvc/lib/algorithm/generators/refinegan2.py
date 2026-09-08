@@ -246,7 +246,8 @@ class BlitGenerator(nn.Module):
         samp_rate (int): Output sample rate in Hz.
         wave_amp (float, optional): Excitation level. Under ``normalize`` it is the
             amplitude of the equivalent sine; otherwise it is the pulse's peak. Defaults to 0.1.
-        noise_std (float, optional): Gaussian noise std in voiced regions. Defaults to 0.003.
+        noise_std (float, optional): Gaussian noise std in voiced regions, and the
+            only stochastic material the decoder is handed there. Defaults to 0.01.
         voiced_threshold (float, optional): f0 above which a frame counts as voiced. Defaults to 0.0.
         bandwidth (float, optional): Fraction of Nyquist to fill, in (0, 1]. 1.0 is the
             true BLIT and the only control this decoder has over activation fold;
@@ -261,7 +262,7 @@ class BlitGenerator(nn.Module):
         self,
         samp_rate: int,
         wave_amp: float = 0.1,
-        noise_std: float = 0.003,
+        noise_std: float = 0.01,
         voiced_threshold: float = 0.0,
         bandwidth: float = 1.0,
         learn_gain: bool = True,
@@ -349,6 +350,16 @@ class BlitGenerator(nn.Module):
             # Unvoiced regions are noise; voiced ones get a small dither. Both
             # sides are RMS since the normalisation above, so the voiced /
             # unvoiced ratio is 2.12, as it was under the sine source.
+            #
+            # That dither used to be 0.003, or 27.4 dB under the harmonic RMS,
+            # while real voiced speech above 10 kHz is nearly all noise -- its
+            # floor between the partials sits 2.6 dB under them. A decoder that
+            # is handed none of it comes out short of it, and no reconstruction
+            # loss can ask for the difference: the minimiser of an L1 against an
+            # unpredictable component is less of that component. Swept on a
+            # 4-epoch pretrain at 32 kHz, 0.01 improves the 10 kHz deficit
+            # (-2.00 -> -1.21 dB) and the multi-scale mel (0.723 -> 0.713) at
+            # once; 0.03 closes more of the band and costs the mel.
             noise_amp = uv * self.noise_std + (1.0 - uv) * self.wave_amp / 3.0
             excitation = blit * uv + noise_amp * torch.randn_like(blit)
 

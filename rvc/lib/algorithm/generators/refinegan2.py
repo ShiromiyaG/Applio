@@ -269,6 +269,12 @@ class BlitGenerator(nn.Module):
     ):
         super().__init__()
 
+        if not 0.0 < float(bandwidth) <= 1.0:
+            raise ValueError(
+                f"bandwidth is a fraction of Nyquist and must be in (0, 1], "
+                f"not {bandwidth!r}."
+            )
+
         self.sampling_rate = int(samp_rate)
         self.wave_amp = float(wave_amp)
         self.noise_std = float(noise_std)
@@ -407,13 +413,32 @@ class RefineGAN2Generator(nn.Module):
         self.leaky_relu_slope = leaky_relu_slope
         self.checkpointing = checkpointing
 
-        # Scalar or one per stage, normalised in one place. The down path
-        # doubles start_channels per stage and the up path expects the skip to
-        # be a quarter of the trunk, so the two only meet at one value.
+        # The down path doubles start_channels per stage and the up path
+        # expects the skip to be a quarter of the trunk, so the two only meet at
+        # one value. Anything else builds, then fails deep in the up path on a
+        # channel mismatch that says nothing about which setting was wrong.
+        required = upsample_initial_channel // (4 * 2 ** (len(upsample_rates) - 1))
+        if int(start_channels) != required:
+            raise ValueError(
+                f"start_channels must be {required} for "
+                f"upsample_initial_channel={upsample_initial_channel} over "
+                f"{len(upsample_rates)} stages, not {start_channels}."
+            )
+
+        # Scalar or one per stage, normalised in one place.
         count = len(upsample_rates)
-        self.filter_width = filter_schedule(filter_width, count)
-        self.rolloff = filter_schedule(rolloff, count)
-        self.filter_beta = filter_schedule(filter_beta, count)
+        self.filter_width = filter_schedule(filter_width, count, "filter_width", 1)
+        self.rolloff = filter_schedule(rolloff, count, "rolloff", 0.0)
+        self.filter_beta = filter_schedule(filter_beta, count, "filter_beta", 0.0)
+
+        # Checked here rather than in ``filter_schedule``, which has no way to
+        # know the setting is a fraction: a rolloff above 1.0 asks the kernel to
+        # pass beyond the stage's Nyquist, which is the one thing it is for.
+        if any(value > 1.0 for value in self.rolloff):
+            raise ValueError(
+                f"rolloff is a fraction of the stage's Nyquist and cannot "
+                f"exceed 1.0, received {self.rolloff}."
+            )
 
         # ``int``, not the np.int64 np.prod returns: Dynamo wraps a numpy
         # scalar as a CPU tensor, and one CPU node makes Inductor emit a C++

@@ -191,14 +191,33 @@ class AntiAliasedUpsample1d(nn.Module):
 def filter_schedule(
     value: "float | Sequence[float]",
     stages: int,
+    name: str,
+    minimum: float | None = None,
 ) -> tuple[float, ...]:
     """
     Normalise a scalar-or-per-stage filter setting into one value per stage.
 
-    Width, rolloff and beta all take either form, so the broadcast lives in one
-    place rather than three.
+    Width, rolloff and beta all take either form and all have to agree on
+    length, so the broadcast and its check live in one place rather than three.
+    A list of the wrong length would otherwise be zipped short against the
+    stages and silently build a different filter than the config asked for.
+
+    Args:
+        value (float | Sequence[float]): One value for every stage, or one per stage.
+        stages (int): Number of upsampling stages.
+        name (str): Setting name, used in the error message.
+        minimum (float, optional): Lowest value the setting accepts. Defaults to None.
     """
 
     if isinstance(value, (int, float)):
-        return (float(value),) * stages
-    return tuple(float(item) for item in value)
+        schedule = (float(value),) * stages
+    else:
+        schedule = tuple(float(item) for item in value)
+    if len(schedule) != stages:
+        raise ValueError(
+            f"{name} has {len(schedule)} entries for {stages} stages; "
+            f"give one per stage or a single value."
+        )
+    if minimum is not None and any(item < minimum for item in schedule):
+        raise ValueError(f"{name} values must be >= {minimum}.")
+    return schedule

@@ -25,6 +25,7 @@ sys.path.append(os.path.join(now_dir))
 from rvc.train.losses import discriminator_loss, feature_loss, generator_loss, kl_loss
 from rvc.train.mel_processing import (
     MultiScaleMelSpectrogramLoss,
+    build_refinegan2_mel_loss,
     mel_spectrogram_torch,
     spec_to_mel_torch,
 )
@@ -70,18 +71,19 @@ randomized = True
 d_lr_coeff = 1.0
 g_lr_coeff = 1.0
 d_step_per_g_step = 1
-multiscale_mel_loss = False
 bf16_adamw = False
 disc_version = "v2"
+# Which spectral loss the vocoder trains against: "l1" is the single-scale mel
+# L1, the other two are multi-scale sets that are not interchangeable -- see
+# ``build_refinegan2_mel_loss``.
+mel_loss_kind = "l1"
 
 if vocoder == "RefineGAN":
     disc_version = "v3"
-    multiscale_mel_loss = True
+    mel_loss_kind = "multiscale"
 elif vocoder == "RefineGAN2":
     disc_version = "v4"
-    # Single-scale, unlike RefineGAN: the multi-scale loss averages over
-    # resolutions, and this decoder's remaining defects are narrow-band.
-    multiscale_mel_loss = False
+    mel_loss_kind = "multiscale_refinegan2"
 
 current_dir = os.getcwd()
 
@@ -440,9 +442,12 @@ def run(
         betas=config.train.betas,
         eps=config.train.eps,
     )
-    if multiscale_mel_loss:
+    if mel_loss_kind == "multiscale":
         fn_mel_loss = MultiScaleMelSpectrogramLoss(sample_rate=config.data.sample_rate)
         print("Using Multi-Scale Mel loss function")
+    elif mel_loss_kind == "multiscale_refinegan2":
+        fn_mel_loss = build_refinegan2_mel_loss(config.data.sample_rate)
+        print("Using Multi-Scale Mel loss function (RefineGAN2 scales)")
     else:
         fn_mel_loss = torch.nn.L1Loss()
         print("Using Single-Scale Mel loss function")
@@ -729,8 +734,12 @@ def train_and_evaluate(
                 # Generator backward and update
                 _, y_d_hat_g, fmap_r, fmap_g = net_d(wave, y_hat)
 
-            if multiscale_mel_loss:
+            if mel_loss_kind == "multiscale":
                 loss_mel = fn_mel_loss(wave, y_hat) * config.train.c_mel / 3.0
+            elif mel_loss_kind == "multiscale_refinegan2":
+                # No divisor here: this scale set folds its own into
+                # ``output_scale``, so it takes ``c_mel`` unmodified.
+                loss_mel = fn_mel_loss(wave, y_hat) * config.train.c_mel
             else:
                 wave_mel = mel_spectrogram_torch(
                     wave.float().squeeze(1),

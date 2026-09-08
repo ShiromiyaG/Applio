@@ -111,17 +111,40 @@ def compute_window_length(n_mels: int, sample_rate: int):
 
 
 class MultiScaleMelSpectrogramLoss(torch.nn.Module):
+    """
+    Mel L1 evaluated at several STFT resolutions at once and summed.
+
+    Short windows resolve timing and blur the spectrum; long windows do the
+    reverse. Scoring both ends charges a defect that only one of them can see.
+
+    The defaults are RefineGAN's scale set. RefineGAN2 uses a different one --
+    see ``build_refinegan2_mel_loss`` -- so the two are not interchangeable and
+    a scale set carries its own ``output_scale``.
+
+    Args:
+        sample_rate (int, optional): Sample rate of the waveforms, in Hz. Defaults to 24000.
+        n_mels (list[int], optional): Mel bands per scale. Defaults to [5, 10, 20, 40, 80, 160, 320].
+        window_lengths (list[int], optional): STFT window per scale, paired with ``n_mels``. Defaults to [32, 64, 128, 256, 512, 1024, 2048].
+        loss_fn (optional): Distance between the two log-mels. Defaults to ``torch.nn.L1Loss()``.
+        output_scale (float, optional): Applied to the summed loss, so a scale set
+            carries its own normalisation instead of leaving each call site to
+            remember a divisor. Defaults to 1.0.
+    """
 
     def __init__(
         self,
         sample_rate: int = 24000,
         n_mels: list[int] = [5, 10, 20, 40, 80, 160, 320],  # , 480],
         window_lengths: list[int] = [32, 64, 128, 256, 512, 1024, 2048],  # , 4096],
-        loss_fn=torch.nn.L1Loss(),
+        loss_fn=None,
+        output_scale: float = 1.0,
     ):
         super().__init__()
         self.sample_rate = sample_rate
-        self.loss_fn = loss_fn
+        # Defaulted here rather than in the signature: a module instance as a
+        # default argument is built once and shared by every caller that omits it.
+        self.loss_fn = loss_fn if loss_fn is not None else torch.nn.L1Loss()
+        self.output_scale = float(output_scale)
         self.log_base = torch.log(torch.tensor(10.0))
         self.stft_params: list[tuple] = []
         self.hann_window: dict[int, torch.Tensor] = {}
@@ -184,4 +207,49 @@ class MultiScaleMelSpectrogramLoss(torch.nn.Module):
             real_logmels = torch.log(real_mels.clamp(min=1e-5)) / self.log_base
             fake_logmels = torch.log(fake_mels.clamp(min=1e-5)) / self.log_base
             loss += self.loss_fn(real_logmels, fake_logmels)
-        return loss
+        return loss * self.output_scale
+
+
+# RefineGAN2's scale set, which is not RefineGAN's.
+#
+# The coarse end of the default set (32/64/128) charges almost nothing for a
+# defect above 6.5 kHz while charging as much as the fine scales at 1-3 kHz, so
+# summing it tilts the loss toward low frequency. Dropping it and adding 4096
+# flattens that tilt. Each set normalised to parity at 1-3 kHz, destroying the
+# harmonic comb one band at a time:
+#
+#     config              1-3k   3-6k   6-9k  9-12k  12-15k   span
+#     32..2048,  /3.25    1.00   0.97   0.98   0.92    0.73   0.27
+#     256..4096, /2.20    1.00   0.98   0.97   0.96    0.92   0.08
+#
+# 4096 is close to free: 13 frames per 400 ms segment against 26 for 2048.
+REFINEGAN2_MEL_N_MELS = [40, 80, 160, 320, 640]
+REFINEGAN2_MEL_WINDOWS = [256, 512, 1024, 2048, 4096]
+
+# Chosen for parity with the single-scale L1 on a 1-3 kHz comb, which is where
+# RefineGAN's ``/ 3.0`` already sat: what the constants above change is the
+# shape across frequency and time, not the overall weight. It rides inside the
+# module as ``output_scale`` rather than being applied by callers, since a call
+# site that forgot it would train at more than twice the intended mel weight.
+REFINEGAN2_MEL_DIVISOR = 2.20
+
+
+def build_refinegan2_mel_loss(sample_rate: int, loss_fn=None):
+    """
+    RefineGAN2's multi-scale mel loss: the scale set above, already normalised.
+
+    Weighted with the same ``c_mel`` the single-scale L1 uses, so unlike
+    RefineGAN's set it needs no divisor at the call site.
+
+    Args:
+        sample_rate (int): Sample rate of the waveforms, in Hz.
+        loss_fn (optional): Distance between the two log-mels. Defaults to ``torch.nn.L1Loss()``.
+    """
+
+    return MultiScaleMelSpectrogramLoss(
+        sample_rate=sample_rate,
+        n_mels=REFINEGAN2_MEL_N_MELS,
+        window_lengths=REFINEGAN2_MEL_WINDOWS,
+        loss_fn=loss_fn,
+        output_scale=1.0 / REFINEGAN2_MEL_DIVISOR,
+    )

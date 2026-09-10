@@ -72,6 +72,32 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, load_opt=1):
             f"would load and mean nothing. Pick a RefineGAN2 pretrained, or "
             f"train the RefineGAN vocoder instead."
         )
+    # Same failure one level down: the impulse-train excitation owned
+    # ``m_source.gain`` and the sine that replaced it owns
+    # ``m_source.merge.0.weight``, so a pre-2026-09-08 RefineGAN2 pretrained
+    # would leave the source at its init and train on from there.
+    source = "dec.m_source.merge.0.weight"
+    if source in model_state_dict and source not in checkpoint_dict["model"]:
+        raise ValueError(
+            f"'{checkpoint_path}' was trained with the impulse-train "
+            f"excitation RefineGAN2 no longer builds (no '{source}'). The "
+            f"source weights would stay at their random init, so start a "
+            f"fresh run or pick a pretrained trained against the sine."
+        )
+    # The count of partials sizes that same tensor. ``load_state_dict`` does
+    # refuse the mismatch even at ``strict=False``, but only as a size error
+    # among the whole state dict; this names the setting that caused it.
+    if source in model_state_dict and source in checkpoint_dict["model"]:
+        expected = model_state_dict[source].shape[-1]
+        found = checkpoint_dict["model"][source].shape[-1]
+        if expected != found:
+            raise ValueError(
+                f"'{checkpoint_path}' carries {found - 1} source harmonics "
+                f"and this run builds {expected - 1}. The count sizes "
+                f"'{source}', so the two cannot be resumed into each other -- "
+                f"match 'source_harmonics' in Synthesizer, or start a fresh "
+                f"run."
+            )
     new_state_dict = {
         k: checkpoint_dict["model"].get(k, v) for k, v in model_state_dict.items()
     }

@@ -637,6 +637,12 @@ def train_and_evaluate(
     san_active = bool(
         getattr(net_d.module if hasattr(net_d, "module") else net_d, "supports_san", False)
     )
+    # One weight per branch, in the discriminator's own order -- ``None`` on a
+    # version that pins none, which is the unweighted sum every version had.
+    # UnivHD is the head this exists for; see ``UNIVHD_WEIGHT``.
+    branch_weights = getattr(
+        net_d.module if hasattr(net_d, "module") else net_d, "branch_weights", None
+    )
     train_loader = loaders[0] if loaders is not None else None
     if writers is not None:
         writer = writers[0]
@@ -711,7 +717,9 @@ def train_and_evaluate(
                     y_d_hat_r, y_d_hat_g, _, _ = net_d(
                         wave, y_hat.detach(), san_training=san_active
                     )
-                loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
+                loss_disc, _, _ = discriminator_loss(
+                    y_d_hat_r, y_d_hat_g, branch_weights=branch_weights
+                )
                 # Discriminator backward and update
                 optim_d.zero_grad()
                 if train_dtype == torch.float16:
@@ -763,8 +771,10 @@ def train_and_evaluate(
                 )
                 loss_mel = fn_mel_loss(wave_mel, y_hat_mel) * config.train.c_mel
             loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl
-            loss_fm = feature_loss(fmap_r, fmap_g)
-            loss_gen, _ = generator_loss(y_d_hat_g, use_softplus=san_active)
+            loss_fm = feature_loss(fmap_r, fmap_g, branch_weights=branch_weights)
+            loss_gen, _ = generator_loss(
+                y_d_hat_g, use_softplus=san_active, branch_weights=branch_weights
+            )
             loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
 
             if loss_gen_all < lowest_value["value"]:

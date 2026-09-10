@@ -55,6 +55,21 @@ def rate_scaled_periods(periods, sample_rate, reference_rate=REFERENCE_SAMPLE_RA
     return tuple(sorted(scaled))
 
 
+#: How much of the adversarial objective UnivHD is allowed to be on ``v4``.
+#:
+#: The paper's additive ``1.0`` is wrong for the branch set this version runs.
+#: On a 32 kHz pretrain with SAN on, ``mean(real logit) - mean(fake logit)``
+#: per branch between steps 2k and 8.5k put UnivHD at 5.1-7.7 against 0.2-2.1
+#: for the other eight heads, and it stayed there rather than converging toward
+#: them.  The generator's term is ``(1 - dg)^2``, so a head separating by ~6
+#: contributes ~10x an average branch's: one of nine heads was most of
+#: ``loss_gen``, and most of the gradient that drove the decoder's grad norm to
+#: 8-15 x 10^3.  0.15 leaves it the loudest single head without leaving it the
+#: only one.  It applies to the feature-matching and discriminator terms too --
+#: a head the generator is told to discount but that trains at full rate keeps
+#: pulling away.
+UNIVHD_WEIGHT = 0.15
+
 #: The three multi-resolution spectrogram branches.  The 512-point branch's
 #: 50-sample hop is what reads frame-rate modulation the other two average
 #: away.
@@ -140,6 +155,14 @@ class MultiPeriodDiscriminator(torch.nn.Module):
                 if univhd
                 else []
             )
+        )
+        #: One loss weight per entry of ``discriminators``, same order, read by
+        #: ``train.py`` and handed to the three adversarial losses.  Built here
+        #: rather than at the call site so it cannot fall out of step with the
+        #: assembly above: a list one entry short would weight the wrong heads.
+        self.branch_weights = tuple(
+            [1.0] * (1 + len(periods) + len(resolutions))
+            + ([UNIVHD_WEIGHT] if univhd else [])
         )
 
     def forward(self, y, y_hat, san_training: bool = False):

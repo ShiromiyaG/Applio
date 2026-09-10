@@ -4,22 +4,41 @@ import torch.nn.functional as F
 from rvc.lib.algorithm.san import SAN_DIRECTION_WEIGHT
 
 
-def feature_loss(fmap_r, fmap_g):
+def _branch_weight(branch_weights, index):
+    """``branch_weights[index]`` as a float, or 1.0 when none are given.
+
+    A plain Python number rather than a tensor: these are per-branch constants
+    read once off the discriminator, and keeping them out of the graph is what
+    makes an unweighted call identical to the code that had no weighting.
+    """
+    if branch_weights is None:
+        return 1.0
+    return float(branch_weights[index])
+
+
+def feature_loss(fmap_r, fmap_g, branch_weights=None):
     """
     Compute the feature loss between reference and generated feature maps.
+
+    A branch's weight scales every layer of it, because its feature-matching
+    pull and its adversarial pull are the same head's opinion -- discounting
+    only one would leave the generator chasing features from a head it was
+    told not to believe.
 
     Args:
         fmap_r (list of torch.Tensor): List of reference feature maps.
         fmap_g (list of torch.Tensor): List of generated feature maps.
+        branch_weights (sequence of float, optional): One weight per branch, in
+            the discriminator's own order. Defaults to None (all 1.0).
     """
     return 2 * sum(
-        torch.mean(torch.abs(rl - gl))
-        for dr, dg in zip(fmap_r, fmap_g)
+        _branch_weight(branch_weights, i) * torch.mean(torch.abs(rl - gl))
+        for i, (dr, dg) in enumerate(zip(fmap_r, fmap_g))
         for rl, gl in zip(dr, dg)
     )
 
 
-def discriminator_loss(disc_real_outputs, disc_generated_outputs):
+def discriminator_loss(disc_real_outputs, disc_generated_outputs, branch_weights=None):
     """
     Compute the discriminator loss for real and generated outputs.
 
@@ -30,14 +49,20 @@ def discriminator_loss(disc_real_outputs, disc_generated_outputs):
     saturating, where the unbounded form lets the discriminator win by pushing
     the direction output negative without discriminating at all.
 
+    Weighting the discriminator's own loss as well as the generator's is
+    deliberate: a head the generator is told to discount but that still trains
+    at full rate keeps pulling away, and that gap is what the weight closes.
+
     Args:
         disc_real_outputs (list of torch.Tensor): List of discriminator outputs for real samples.
         disc_generated_outputs (list of torch.Tensor): List of discriminator outputs for generated samples.
+        branch_weights (sequence of float, optional): One weight per branch, in
+            the discriminator's own order. Defaults to None (all 1.0).
     """
     loss = 0
     r_losses = []
     g_losses = []
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
+    for i, (dr, dg) in enumerate(zip(disc_real_outputs, disc_generated_outputs)):
         if isinstance(dr, (list, tuple)):
             dr_fun, dr_dir = dr
             dg_fun, dg_dir = dg
@@ -53,12 +78,13 @@ def discriminator_loss(disc_real_outputs, disc_generated_outputs):
 
         # r_losses.append(r_loss.item())
         # g_losses.append(g_loss.item())
-        loss += r_loss + g_loss
+        weight = _branch_weight(branch_weights, i)
+        loss += weight * (r_loss + g_loss) if weight != 1.0 else r_loss + g_loss
 
     return loss, r_losses, g_losses
 
 
-def generator_loss(disc_outputs, use_softplus: bool = False):
+def generator_loss(disc_outputs, use_softplus: bool = False, branch_weights=None):
     """
     Compute the generator loss based on discriminator outputs.
 
@@ -70,16 +96,19 @@ def generator_loss(disc_outputs, use_softplus: bool = False):
     Args:
         disc_outputs (list of torch.Tensor): List of discriminator outputs for generated samples.
         use_softplus (bool): Use the squared-softplus surrogate SAN pairs with.
+        branch_weights (sequence of float, optional): One weight per branch, in
+            the discriminator's own order. Defaults to None (all 1.0).
     """
     loss = 0
     gen_losses = []
-    for dg in disc_outputs:
+    for i, dg in enumerate(disc_outputs):
         if use_softplus:
             l = torch.mean(F.softplus(1.0 - dg.float()).square())
         else:
             l = torch.mean((1 - dg.float()) ** 2)
         # gen_losses.append(l.item())
-        loss += l
+        weight = _branch_weight(branch_weights, i)
+        loss += weight * l if weight != 1.0 else l
 
     return loss, gen_losses
 

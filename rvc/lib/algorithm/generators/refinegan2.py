@@ -231,142 +231,152 @@ class ParallelResBlock(nn.Module):
         return torch.stack([block(x) for block in self.blocks], dim=0).mean(dim=0)
 
 
-class BlitGenerator(nn.Module):
+class SineGenerator(nn.Module):
     """
-    Band-limited impulse train excitation, replacing the sine source.
+    Sine + additive-noise harmonic excitation source.
 
-    A sine carries one partial, so the trunk has to manufacture every harmonic
-    above it out of activation products. A BLIT hands the trunk every harmonic
-    under Nyquist already, and it is band-limited by construction: it is the
-    Dirichlet kernel ``sin(pi*M*phi) / (M*sin(pi*phi))``, which is a sum of M
-    cosines and nothing else. The harmonic count follows f0 per sample and is
-    fractional, so a moving pitch does not step it discontinuously.
+    A source that fills the band flat -- the impulse train this replaced --
+    arrives unshaped wherever the trunk does not reach, because ``source_gain``
+    is one scalar per frame and can move the excitation's level but not its
+    tilt: +18 dB against the reference at 4.4-5 kHz, with the crossover exactly
+    at the trunk's 3960 Hz ceiling. On a fixed trunk the sine measured better
+    anyway: held-out multi-scale mel 1.9714 -> 1.7418 with ``source_gain`` on.
+
+    ``harmonic_num`` puts partials back into the source, alias-free and in tune
+    by construction, and ``harmonic_tilt`` gives them a slope instead: partial
+    ``j`` at ``j ** -tilt``, 1.0 being a sawtooth's -6 dB/octave, which lands
+    within ~5 dB of a real voice across the whole band (relative to 300-600 Hz
+    at f0=200: voice -5.5 dB at 1-2 kHz and -33.8 at 12-15.5 kHz, tilt 1.0
+    -9.1 and -28.9). It ships at 0 -- one partial, everything else manufactured
+    by the trunk -- because overfitting a single clip, this decoder at 0 already
+    reproduces a target's harmonic contrast to within 0.7 dB up to 13 kHz, so a
+    source short of partials is not what costs a trained model its high
+    harmonics. ``dim`` sizes ``merge.0.weight``, so raising the count is a fresh
+    pretrain.
 
     Args:
         samp_rate (int): Output sample rate in Hz.
-        wave_amp (float, optional): Excitation level. Under ``normalize`` it is the
-            amplitude of the equivalent sine; otherwise it is the pulse's peak. Defaults to 0.1.
+        harmonic_num (int, optional): Partials above the fundamental. Defaults to 0.
+        sine_amp (float, optional): Amplitude of the fundamental. Defaults to 0.1.
         noise_std (float, optional): Gaussian noise std in voiced regions, and the
-            only stochastic material the decoder is handed there. Defaults to 0.01.
+            only stochastic material the decoder is handed there. Defaults to 0.003.
         voiced_threshold (float, optional): f0 above which a frame counts as voiced. Defaults to 0.0.
-        bandwidth (float, optional): Fraction of Nyquist to fill, in (0, 1]. 1.0 is the
-            true BLIT and the only control this decoder has over activation fold;
-            lowering it delivers less detail but less intermodulation downstream. Defaults to 1.0.
-        learn_gain (bool, optional): A single learned scalar on the excitation level. Defaults to True.
-        normalize (bool, optional): Hold the excitation's energy constant across the
-            pitch range instead of its peak, which is worth 13-23 dB of level
-            depending on the note. Defaults to True.
+        harmonic_tilt (float, optional): Partial ``j`` gets amplitude ``j ** -tilt``. Defaults to 1.0.
     """
+
+    # Fraction of Nyquist over which a partial fades out instead of being
+    # switched off. f0 moves between frames, so a hard mask makes the top
+    # partial blink on and off around the boundary -- a click at the frame rate.
+    NYQUIST_TAPER = 0.1
 
     def __init__(
         self,
         samp_rate: int,
-        wave_amp: float = 0.1,
-        noise_std: float = 0.01,
+        harmonic_num: int = 0,
+        sine_amp: float = 0.1,
+        noise_std: float = 0.003,
         voiced_threshold: float = 0.0,
-        bandwidth: float = 1.0,
-        learn_gain: bool = True,
-        normalize: bool = True,
+        harmonic_tilt: float = 1.0,
     ):
         super().__init__()
-
-        if not 0.0 < float(bandwidth) <= 1.0:
-            raise ValueError(
-                f"bandwidth is a fraction of Nyquist and must be in (0, 1], "
-                f"not {bandwidth!r}."
-            )
-
         self.sampling_rate = int(samp_rate)
-        self.wave_amp = float(wave_amp)
+        self.harmonic_num = int(harmonic_num)
+        self.dim = self.harmonic_num + 1
+        self.sine_amp = float(sine_amp)
         self.noise_std = float(noise_std)
         self.voiced_threshold = float(voiced_threshold)
-        self.bandwidth = float(bandwidth)
-        self.normalize = bool(normalize)
+        self.harmonic_tilt = float(harmonic_tilt)
 
-        # One scalar, with grad, so the excitation level is learned while the
-        # waveform itself stays a pure function of f0.
-        self.gain = (
-            nn.Parameter(torch.ones(1)) if learn_gain else None
+        # Non-persistent: this module owns exactly one state-dict key, so the
+        # tilt changes every partial's level while leaving the file untouched.
+        orders = torch.arange(1, self.dim + 1, dtype=torch.float32)
+        self.register_buffer(
+            "harmonic_gain",
+            orders ** (-self.harmonic_tilt),
+            persistent=False,
         )
 
-    # Inductor cannot compile the phase cumsum; it is a pure function of f0
-    # under no_grad, so keeping it out of the graph costs no fusion.
+        self.merge = nn.Sequential(nn.Linear(self.dim, 1, bias=False), nn.Tanh())
+        # Ones, not ``nn.Linear``'s default ``U(-1, 1)`` at fan_in 1: at
+        # ``harmonic_num = 0`` that draw is the only thing scaling the source
+        # and nothing downstream normalises it, so over 200 seeds it landed
+        # anywhere in +-0.99 -- negative in 48% of them, a 719x spread in
+        # excitation RMS. ``sine_amp`` is what states the intended amplitude.
+        # At dim > 1 the partials sum instead, and ``harmonic_gain`` has
+        # already set their levels, so this layer only has to add them up:
+        # RMS 0.0707 at 1 partial, 0.0898 at 32, bounded by 0.0907 at any
+        # count, which leaves the ``Tanh`` near-linear (-61.6 dB against its best
+        # linear fit at 1 partial, -53.8 at 32).
+        nn.init.ones_(self.merge[0].weight)
+
+    def _f02uv(self, f0: torch.Tensor) -> torch.Tensor:
+        return torch.ones_like(f0) * (f0 > self.voiced_threshold)
+
+    def _nyquist_fade(self, f0_buf: torch.Tensor) -> torch.Tensor:
+        """
+        Per-partial gain reaching 0 at Nyquist, read off each partial's own
+        frequency. Exactly ones at ``harmonic_num = 0``.
+
+        ``_f02sine`` takes ``f / sr`` mod 1, so a partial past Nyquist folds
+        back onto the band as an inharmonic line that walks against f0.
+        """
+
+        nyquist = self.sampling_rate / 2.0
+        return ((nyquist - f0_buf) / (nyquist * self.NYQUIST_TAPER)).clamp(0.0, 1.0)
+
+    def _f02sine(self, f0_values: torch.Tensor) -> torch.Tensor:
+        """f0_values: (batch, length, dim), dim = fundamental + overtones."""
+
+        # F0 in rad mod 1; the integer cycle count doesn't affect phase.
+        rad_values = (f0_values / self.sampling_rate) % 1
+
+        # Random initial phase per harmonic, none for the fundamental.
+        rand_ini = torch.rand(
+            f0_values.shape[0], f0_values.shape[2], device=f0_values.device
+        )
+        rand_ini[:, 0] = 0
+        rad_values[:, 0, :] = rad_values[:, 0, :] + rand_ini
+
+        tmp_over_one = torch.cumsum(rad_values, 1) % 1
+        tmp_over_one_idx = (tmp_over_one[:, 1:, :] - tmp_over_one[:, :-1, :]) < 0
+        cumsum_shift = torch.zeros_like(rad_values)
+        cumsum_shift[:, 1:, :] = tmp_over_one_idx * -1.0
+
+        return torch.sin(torch.cumsum(rad_values + cumsum_shift, dim=1) * 2 * np.pi)
+
+    # Inductor cannot compile the phase cumsum -- it lowers to a ``SplitScan``
+    # whose codegen raises on torch 2.10, taking the whole decoder's compile
+    # down with it. Everything up to ``merge`` is a pure function of f0 under
+    # no_grad, so keeping it out of the graph costs no fusion.
     @torch.compiler.disable
     def forward(self, f0: torch.Tensor) -> torch.Tensor:
-        """f0: (batch, 1, samples) at the output rate.  Returns the same shape."""
+        """f0: (batch, length, 1) at the output rate. Returns (batch, length, 1)."""
 
         with torch.no_grad():
-            uv = (f0 > self.voiced_threshold).to(f0.dtype)
-            f0_safe = f0.clamp_min(1.0)
+            f0_buf = torch.zeros(f0.shape[0], f0.shape[1], self.dim, device=f0.device)
+            f0_buf[:, :, 0] = f0[:, :, 0]
+            for idx in range(self.harmonic_num):
+                f0_buf[:, :, idx + 1] = f0_buf[:, :, 0] * (idx + 2)
 
-            # float64: in float32 the running sum reaches ~1e4 cycles within a
-            # second of audio, which is audible phase jitter on every harmonic
-            phase = torch.cumsum(f0_safe.double() / self.sampling_rate, dim=-1)
-            phase = phase - torch.floor(phase)
+            sine_waves = self._f02sine(f0_buf) * self.sine_amp
+            # Both are identity at ``harmonic_num = 0``: the gain is ``[1.0]``
+            # and no fundamental sits within 10% of Nyquist.
+            sine_waves = sine_waves * self.harmonic_gain
+            sine_waves = sine_waves * self._nyquist_fade(f0_buf)
 
-            # Fractional harmonic count. An integer count evaluated per sample
-            # steps whenever f0 crosses ``limit / N``, and every step is a
-            # discontinuity whose rate tracks the pitch -- which reads as a
-            # fold in a spectrogram. Weighting the top conjugate pair by the
-            # fraction makes the count continuous in f0, for one extra cosine
-            # (5-cent vibrato: -67.1 -> -106.7 dB in the 20 Hz .. f0/2 band).
-            #
-            # The ``- f0_safe`` is a one-partial margin: whenever f0 divides
-            # sr/2 the top partial would land on Nyquist, where its conjugate
-            # image doubles it, 6 dB above every other partial.
-            limit = self.bandwidth * self.sampling_rate / 2.0 - f0_safe.double()
-            kmax = (limit / f0_safe.double()).clamp_min(1.0)
-            n_har = torch.floor(kmax)
-            w = kmax - n_har
-            m = 2.0 * n_har + 1.0
+            uv = self._f02uv(f0)
 
-            denominator = torch.sin(np.pi * phase)
-            # phi -> 0 is the removable singularity where every cosine is in
-            # phase and the unnormalised kernel equals M.
-            singular = denominator.abs() < 1e-12
-            core = torch.where(
-                singular,
-                m,
-                torch.sin(np.pi * m * phase)
-                / torch.where(singular, torch.ones_like(denominator), denominator),
-            )
-            core = core + 2.0 * w * torch.cos(2.0 * np.pi * (n_har + 1.0) * phase)
-            # The value at phi = 0, so the kernel keeps its unit peak. The
-            # normalisation below divides by this one too, or the integer step
-            # would go straight back into the level.
-            weight = m + 2.0 * w
+            # Unvoiced regions are noise; voiced ones get a small dither.
+            # ``merge`` sums ``dim`` independent draws, so without the
+            # ``sqrt(dim)`` the dither the decoder receives would grow with the
+            # harmonic count and ``noise_std`` would stop meaning what it says.
+            noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
+            noise = noise_amp * torch.randn_like(sine_waves) / self.dim**0.5
 
-            blit = core / weight
-            # The kernel is normalised to a unit *peak*, so each of its M
-            # harmonics carries 1/M and the excitation gets quieter the lower
-            # the note -- a 20 dB tilt across a singer's range that nothing
-            # downstream knows about, and it inverted the voiced/unvoiced
-            # balance too. ``sqrt(M/2)`` puts the RMS at ``wave_amp / sqrt(2)``
-            # at every pitch, which is exactly a sine of amplitude ``wave_amp``.
-            if self.normalize:
-                blit = blit * torch.sqrt(weight / 2.0)
-            blit = blit.to(f0.dtype) * self.wave_amp
+            sine_waves = sine_waves * uv + noise
 
-            # Unvoiced regions are noise; voiced ones get a small dither. Both
-            # sides are RMS since the normalisation above, so the voiced /
-            # unvoiced ratio is 2.12, as it was under the sine source.
-            #
-            # That dither used to be 0.003, or 27.4 dB under the harmonic RMS,
-            # while real voiced speech above 10 kHz is nearly all noise -- its
-            # floor between the partials sits 2.6 dB under them. A decoder that
-            # is handed none of it comes out short of it, and no reconstruction
-            # loss can ask for the difference: the minimiser of an L1 against an
-            # unpredictable component is less of that component. Swept on a
-            # 4-epoch pretrain at 32 kHz, 0.01 improves the 10 kHz deficit
-            # (-2.00 -> -1.21 dB) and the multi-scale mel (0.723 -> 0.713) at
-            # once; 0.03 closes more of the band and costs the mel.
-            noise_amp = uv * self.noise_std + (1.0 - uv) * self.wave_amp / 3.0
-            excitation = blit * uv + noise_amp * torch.randn_like(blit)
-
-        if self.gain is not None:
-            excitation = excitation * self.gain
-
-        return excitation
+        # Merged with grad: one learned scalar per partial.
+        return self.merge(sine_waves)
 
 
 class RefineGAN2Generator(nn.Module):
@@ -375,8 +385,8 @@ class RefineGAN2Generator(nn.Module):
 
     Downsamples and upchannels an excitation, fuses it with the latent, and
     upsamples through parallel residual blocks. Against the original: a
-    band-limited impulse train instead of the sine, descending stage rates, a
-    windowed-sinc interpolation filter that crops its own group delay, an
+    tilted harmonic sine instead of the truncated-sinc comb, descending stage
+    rates, a windowed-sinc interpolation filter that crops its own group delay, an
     excitation gain projected from the conditioning, and f0 interpolated in log
     with a hard voiced/unvoiced gate. Every pointwise nonlinearity is a plain
     Leaky ReLU at its own rate.
@@ -395,9 +405,13 @@ class RefineGAN2Generator(nn.Module):
         filter_beta (float | Sequence[float], optional): Kaiser beta for the interpolation filter.
         source_gain (bool, optional): Scale the excitation by an intensity envelope
             projected from the conditioning, as RefineGAN's paper does with the mel. Defaults to False.
-        source_bandwidth (float, optional): Fraction of Nyquist the BLIT fills. Defaults to 1.0.
-        source_normalize (bool, optional): Hold the excitation's energy constant across
-            the pitch range instead of its peak. Defaults to True.
+        source_noise_std (float, optional): Dither the excitation carries in voiced
+            frames. Defaults to 0.01.
+        source_harmonics (int, optional): Partials above the fundamental in the
+            excitation. Sizes ``m_source.merge.0.weight``, so it cannot change on a
+            resume. Defaults to 0.
+        source_tilt (float, optional): Partial ``j`` gets amplitude ``j ** -tilt``.
+            Leaves no state-dict key. Defaults to 1.0.
     """
 
     def __init__(
@@ -415,8 +429,9 @@ class RefineGAN2Generator(nn.Module):
         rolloff: "float | Sequence[float]" = DEFAULT_UPSAMPLE_ROLLOFF,
         filter_beta: "float | Sequence[float]" = DEFAULT_UPSAMPLE_BETA,
         source_gain: bool = False,
-        source_bandwidth: float = 1.0,
-        source_normalize: bool = True,
+        source_noise_std: float = 0.01,
+        source_harmonics: int = 0,
+        source_tilt: float = 1.0,
     ):
         super().__init__()
         self.sample_rate = int(sample_rate)
@@ -456,16 +471,25 @@ class RefineGAN2Generator(nn.Module):
         # kernel, which on Windows needs cl.exe and fails the whole compile.
         self.upp = int(np.prod(upsample_rates))
 
-        # The excitation. Neither of these appears in the state dict --
-        # BlitGenerator owns one scalar parameter whatever they are -- so a
-        # checkpoint trained against one source loads into another silently.
-        self.source_type = "blit"
-        self.source_bandwidth = float(source_bandwidth)
-        self.source_normalize = bool(source_normalize)
-        self.m_source = BlitGenerator(
+        # The excitation. ``source_noise_std`` is the only stochastic material
+        # the decoder is handed in voiced frames, and real voiced speech above
+        # 10 kHz is barely harmonic at all -- its floor between the partials
+        # sits 2.6 dB under them. Swept on a 4-epoch pretrain at 32 kHz, 0.01
+        # improves the 10 kHz deficit (-2.00 -> -1.21 dB) and the multi-scale
+        # mel (0.723 -> 0.713) at once over the 0.003 this shipped with; 0.03
+        # closes more of the band and costs the mel.
+        #
+        # The tilt leaves no state-dict key, so a checkpoint trained under one
+        # loads into another silently. The count does not: it sizes
+        # ``merge.0.weight``.
+        self.source_noise_std = float(source_noise_std)
+        self.source_harmonics = int(source_harmonics)
+        self.source_tilt = float(source_tilt)
+        self.m_source = SineGenerator(
             sample_rate,
-            bandwidth=source_bandwidth,
-            normalize=source_normalize,
+            harmonic_num=self.source_harmonics,
+            noise_std=self.source_noise_std,
+            harmonic_tilt=self.source_tilt,
         )
 
         # ``start_channels``, not a literal 16.  It was hardcoded here while
@@ -513,7 +537,7 @@ class RefineGAN2Generator(nn.Module):
 
         # The paper scales its template by intensity values read off the mel;
         # this decoder is handed z, from which a least-squares fit recovers the
-        # log intensity at r = 0.996. The BLIT carries no envelope of its own,
+        # log intensity at r = 0.996. The sine carries no envelope of its own,
         # so this is worth having: held-out multi-scale mel on a fixed trunk
         # improves 1.97 -> 1.74, for 193 parameters.
         self.has_source_gain = bool(source_gain)
@@ -636,7 +660,9 @@ class RefineGAN2Generator(nn.Module):
         if f0.dim() == 2:
             f0 = f0.unsqueeze(1)
         f0 = self._expand_f0(f0, f0_size * self.upp)
-        har_source = self.m_source(f0)
+        # ``SineGenerator`` works in (batch, time, dim), where dim is the
+        # harmonic axis; the trunk is channel-first throughout.
+        har_source = self.m_source(f0.transpose(1, 2)).transpose(1, 2)
         har_source = self._apply_source_gain(har_source, mel)
         x = self.pre_conv(har_source)
         downs = []

@@ -119,9 +119,15 @@ class Synthesizer(torch.nn.Module):
                 # say which arrangement it was trained under. They are fixed
                 # here rather than read from a config for that reason: training
                 # and inference build the same decoder because there is only
-                # one. ``source_bandwidth`` and ``source_normalize`` stay at the
-                # generator's own defaults -- the full-band BLIT, energy
-                # normalised across the pitch range.
+                # one.
+                #
+                # ``source_harmonics`` is the exception -- it sizes
+                # ``m_source.merge.0.weight``, so a mismatch is a load error
+                # rather than a silent one, and changing it needs a fresh
+                # pretrain. At 0 the excitation is one partial and the trunk
+                # manufactures every harmonic above it; 32 tilted partials put
+                # the scaffolding in the source instead, alias-free and in tune
+                # by construction.
                 self.dec = RefineGAN2Generator(
                     sample_rate=sr,
                     upsample_rates=upsample_rates_for(sr, hop_length),
@@ -132,6 +138,9 @@ class Synthesizer(torch.nn.Module):
                     start_channels=16,
                     leaky_relu_slope=0.2,
                     source_gain=True,
+                    source_noise_std=0.01,
+                    source_harmonics=32,
+                    source_tilt=1.0,
                 )
             else:
                 self.dec = HiFiGANNSFGenerator(

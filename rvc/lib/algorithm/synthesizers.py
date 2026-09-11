@@ -72,6 +72,9 @@ class Synthesizer(torch.nn.Module):
         self.segment_size = segment_size
         self.use_f0 = use_f0
         self.randomized = randomized
+        # RefineGAN2 renders the prior sample as bursts between the harmonics,
+        # and 0.3 removes most of them for 0.8 dB above 12 kHz.
+        self.noise_scale = 0.3 if vocoder == "RefineGAN2" else 0.66666
 
         self.enc_p = TextEncoder(
             inter_channels,
@@ -263,7 +266,7 @@ class Synthesizer(torch.nn.Module):
         """
         g = self.emb_g(sid).unsqueeze(-1)
         m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
-        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
+        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * self.noise_scale) * x_mask
 
         if rate is not None:
             head = int(z_p.shape[2] * (1.0 - rate.item()))

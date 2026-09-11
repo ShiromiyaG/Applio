@@ -6,6 +6,7 @@ import datetime
 import glob
 import json
 from collections import deque
+from contextlib import nullcontext
 from random import randint, shuffle
 from time import time as ttime
 
@@ -43,6 +44,7 @@ from rvc.train.utils import (
 import rvc.lib.zluda
 from rvc.lib.algorithm import commons
 from rvc.lib.algorithm.san import normalize_san_weights
+from rvc.train.ema import WeightEMA
 from rvc.train.process.extract_model import extract_model
 
 # Parse command line arguments
@@ -522,6 +524,11 @@ def run(
                 print(e)
                 sys.exit(1)
 
+    # RefineGAN2's live weights read the latent's noise as bursts between the
+    # harmonics far more than their average does, so previews, checkpoints and
+    # exported models all use the average.
+    ema = WeightEMA(net_g) if vocoder == "RefineGAN2" and rank == 0 else None
+
     # Initialize schedulers
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
         optim_g, gamma=config.train.lr_decay, last_epoch=epoch_str - 2
@@ -587,10 +594,23 @@ def run(
             reference,
             fn_mel_loss,
             scaler,
+            ema,
         )
 
         scheduler_g.step()
         scheduler_d.step()
+
+
+def averaged_weights(ema, net_g):
+    """
+    Load the averaged generator weights for as long as the block runs.
+
+    Args:
+        ema (WeightEMA): Average of the generator weights, or None to keep the
+            live weights.
+        net_g (torch.nn.Module): The generator.
+    """
+    return ema.applied(net_g) if ema is not None else nullcontext()
 
 
 def train_and_evaluate(
@@ -609,6 +629,7 @@ def train_and_evaluate(
     reference,
     fn_mel_loss,
     scaler,
+    ema=None,
 ):
     """
     Trains and evaluates the model for one epoch.
@@ -623,6 +644,8 @@ def train_and_evaluate(
         writers (list): List of TensorBoard writers [writer_eval].
         cache (list): List to cache data in GPU memory.
         use_cpu (bool): Whether to use CPU for training.
+        ema (WeightEMA, optional): Average of the generator weights, used for
+            previews, checkpoints and exported models.
     """
     global global_step, lowest_value, loss_disc
 
@@ -795,6 +818,9 @@ def train_and_evaluate(
                 grad_norm_g = commons.grad_norm(net_g.parameters())
                 optim_g.step()
 
+            if ema is not None:
+                ema.update(net_g)
+
             global_step += 1
 
             # queue for rolling losses over 50 steps
@@ -902,7 +928,7 @@ def train_and_evaluate(
             with torch.amp.autocast(
                 device_type="cuda", enabled=use_amp, dtype=train_dtype
             ):
-                with torch.no_grad():
+                with torch.no_grad(), averaged_weights(ema, net_g):
                     if hasattr(net_g, "module"):
                         o, *_ = net_g.module.infer(*reference)
                     else:
@@ -944,14 +970,15 @@ def train_and_evaluate(
         # Save weights every N epochs
         if epoch % save_every_epoch == 0:
             checkpoint_suffix = f"{2333333 if save_only_latest else global_step}.pth"
-            save_checkpoint(
-                net_g,
-                optim_g,
-                config.train.learning_rate,
-                epoch,
-                os.path.join(experiment_dir, "G_" + checkpoint_suffix),
-                scaler,
-            )
+            with averaged_weights(ema, net_g):
+                save_checkpoint(
+                    net_g,
+                    optim_g,
+                    config.train.learning_rate,
+                    epoch,
+                    os.path.join(experiment_dir, "G_" + checkpoint_suffix),
+                    scaler,
+                )
             save_checkpoint(
                 net_d,
                 optim_d,
@@ -989,23 +1016,24 @@ def train_and_evaluate(
             os.remove(m)
 
         if model_add:
-            ckpt = (
-                net_g.module.state_dict()
-                if hasattr(net_g, "module")
-                else net_g.state_dict()
-            )
-            for m in model_add:
-                if not os.path.exists(m):
-                    extract_model(
-                        ckpt=ckpt,
-                        sr=config.data.sample_rate,
-                        name=model_name,
-                        model_path=m,
-                        epoch=epoch,
-                        step=global_step,
-                        hps=hps,
-                        vocoder=vocoder,
-                    )
+            with averaged_weights(ema, net_g):
+                ckpt = (
+                    net_g.module.state_dict()
+                    if hasattr(net_g, "module")
+                    else net_g.state_dict()
+                )
+                for m in model_add:
+                    if not os.path.exists(m):
+                        extract_model(
+                            ckpt=ckpt,
+                            sr=config.data.sample_rate,
+                            name=model_name,
+                            model_path=m,
+                            epoch=epoch,
+                            step=global_step,
+                            hps=hps,
+                            vocoder=vocoder,
+                        )
 
         if done:
             # Clean-up process IDs from config.json

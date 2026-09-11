@@ -56,14 +56,14 @@ def upsample_rates_for(sample_rate: int, hop_length: int):
 # early stages are short enough that a long kernel reads more of the padding
 # than of the signal.
 DEFAULT_UPSAMPLE_WIDTH = (12, 24, 32, 48)
-DEFAULT_UPSAMPLE_ROLLOFF = (0.90, 0.95, 0.97, 0.99)
+DEFAULT_UPSAMPLE_ROLLOFF = (0.90, 0.95, 0.97, 0.97)
 DEFAULT_UPSAMPLE_BETA = (6.0, 6.0, 6.0, 9.0)
 
 # The excitation gain is one channel, so its upsample chain is free whatever
 # the kernel length -- and it is the one path where an image is multiplied onto
 # every harmonic as a sideband. It gets the longest design at every stage.
 SOURCE_GAIN_WIDTH = 48
-SOURCE_GAIN_ROLLOFF = 0.99
+SOURCE_GAIN_ROLLOFF = 0.97
 SOURCE_GAIN_BETA = 9.0
 
 
@@ -666,8 +666,11 @@ class RefineGAN2Generator(nn.Module):
         har_source = self._apply_source_gain(har_source, mel)
         x = self.pre_conv(har_source)
         downs = []
-        for block, (old_size, new_size) in zip(self.downsample_blocks, self.df0):
-            x = F.leaky_relu(x, self.leaky_relu_slope)
+        for index, (block, (old_size, new_size)) in enumerate(
+            zip(self.downsample_blocks, self.df0)
+        ):
+            if index == 0:
+                x = F.leaky_relu(x, self.leaky_relu_slope)
             downs.append(x)
             x = self._decimate(x, int(f0_size * old_size), int(f0_size * new_size))
             x = block(x)
@@ -683,14 +686,14 @@ class RefineGAN2Generator(nn.Module):
             self.upsample_conv_blocks,
             reversed(downs),
         ):
-            x = F.leaky_relu(x, self.leaky_relu_slope)
-
             if self.training and self.checkpointing:
                 x = checkpoint(ups, x, use_reentrant=False)
+                x = F.leaky_relu(x, self.leaky_relu_slope)
                 x = torch.cat([x, down], dim=1)
                 x = checkpoint(res, x, use_reentrant=False)
             else:
                 x = ups(x)
+                x = F.leaky_relu(x, self.leaky_relu_slope)
                 x = torch.cat([x, down], dim=1)
                 x = res(x)
 

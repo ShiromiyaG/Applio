@@ -74,6 +74,7 @@ UNIVHD_WEIGHT = 0.15
 #: 50-sample hop is what reads frame-rate modulation the other two average
 #: away.
 V3_RESOLUTIONS = [[1024, 120, 600], [2048, 240, 1200], [512, 50, 240]]
+V4_RESOLUTIONS = [[1024, 120, 1024], [2048, 240, 2048], [512, 50, 240]]
 
 
 class MultiPeriodDiscriminator(torch.nn.Module):
@@ -117,7 +118,7 @@ class MultiPeriodDiscriminator(torch.nn.Module):
             # and the paper reports it beating either branch family alone only
             # when added to one rather than replacing it.
             periods = rate_scaled_periods(V4_BASE_PERIODS, sample_rate)
-            resolutions = V3_RESOLUTIONS
+            resolutions = V4_RESOLUTIONS
             univhd = True
             # SAN (arXiv 2301.12811) is part of this layout, not a switch on it.
             # It replaces every branch's last projection with a unit-norm

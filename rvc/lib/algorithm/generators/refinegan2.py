@@ -406,7 +406,7 @@ class RefineGAN2Generator(nn.Module):
         source_gain (bool, optional): Scale the excitation by an intensity envelope
             projected from the conditioning, as RefineGAN's paper does with the mel. Defaults to False.
         source_noise_std (float, optional): Dither the excitation carries in voiced
-            frames. Defaults to 0.01.
+            frames. Defaults to 0.003.
         source_harmonics (int, optional): Partials above the fundamental in the
             excitation. Sizes ``m_source.merge.0.weight``, so it cannot change on a
             resume. Defaults to 0.
@@ -429,7 +429,7 @@ class RefineGAN2Generator(nn.Module):
         rolloff: "float | Sequence[float]" = DEFAULT_UPSAMPLE_ROLLOFF,
         filter_beta: "float | Sequence[float]" = DEFAULT_UPSAMPLE_BETA,
         source_gain: bool = False,
-        source_noise_std: float = 0.01,
+        source_noise_std: float = 0.003,
         source_harmonics: int = 0,
         source_tilt: float = 1.0,
     ):
@@ -477,7 +477,8 @@ class RefineGAN2Generator(nn.Module):
         # sits 2.6 dB under them. Swept on a 4-epoch pretrain at 32 kHz, 0.01
         # improves the 10 kHz deficit (-2.00 -> -1.21 dB) and the multi-scale
         # mel (0.723 -> 0.713) at once over the 0.003 this shipped with; 0.03
-        # closes more of the band and costs the mel.
+        # closes more of the band and costs the mel. Ships at 0.003: 0.01 is
+        # also most of what sits between the harmonics above 4 kHz.
         #
         # The tilt leaves no state-dict key, so a checkpoint trained under one
         # loads into another silently. The count does not: it sizes

@@ -141,7 +141,7 @@ class Synthesizer(torch.nn.Module):
                     start_channels=16,
                     leaky_relu_slope=0.2,
                     source_gain=True,
-                    source_noise_std=0.01,
+                    source_noise_std=0.003,
                     source_harmonics=35,
                     source_tilt=1.0,
                 )

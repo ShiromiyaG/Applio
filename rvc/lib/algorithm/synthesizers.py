@@ -72,9 +72,7 @@ class Synthesizer(torch.nn.Module):
         self.segment_size = segment_size
         self.use_f0 = use_f0
         self.randomized = randomized
-        # RefineGAN2 renders the prior sample as bursts between the harmonics,
-        # and 0.3 removes most of them for 0.8 dB above 12 kHz.
-        self.noise_scale = 0.3 if vocoder == "RefineGAN2" else 0.66666
+        self.noise_scale = 0.66666
 
         self.enc_p = TextEncoder(
             inter_channels,
@@ -112,25 +110,9 @@ class Synthesizer(torch.nn.Module):
                     checkpointing=checkpointing,
                 )
             elif vocoder == "RefineGAN2":
-                # The hop is the product of the config's stage rates, whatever
-                # their order; RefineGAN2 wants its own descending
-                # factorisation of it.
                 hop_length = 1
                 for rate in upsample_rates:
                     hop_length *= int(rate)
-                # These leave no trace in the weights, so a checkpoint cannot
-                # say which arrangement it was trained under. They are fixed
-                # here rather than read from a config for that reason: training
-                # and inference build the same decoder because there is only
-                # one.
-                #
-                # ``source_harmonics`` is the exception -- it sizes
-                # ``m_source.merge.0.weight``, so a mismatch is a load error
-                # rather than a silent one, and changing it needs a fresh
-                # pretrain. At 0 the excitation is one partial and the trunk
-                # manufactures every harmonic above it; 32 tilted partials put
-                # the scaffolding in the source instead, alias-free and in tune
-                # by construction.
                 self.dec = RefineGAN2Generator(
                     sample_rate=sr,
                     upsample_rates=upsample_rates_for(sr, hop_length),
@@ -142,7 +124,7 @@ class Synthesizer(torch.nn.Module):
                     leaky_relu_slope=0.2,
                     source_gain=True,
                     source_noise_std=0.003,
-                    source_harmonics=35,
+                    source_harmonics=200,
                     source_tilt=1.0,
                 )
             else:
@@ -192,6 +174,22 @@ class Synthesizer(torch.nn.Module):
             gin_channels=gin_channels,
         )
         self.emb_g = torch.nn.Embedding(spk_embed_dim, gin_channels)
+        # Set from a checkpoint by ``set_prior_noise_subspace``.
+        self.register_buffer("prior_noise_subspace", None, persistent=False)
+
+    def set_prior_noise_subspace(self, basis: Optional[torch.Tensor]):
+        """
+        Keep the prior draw out of ``basis`` ([inter_channels, k]) in ``infer``.
+
+        These are the latent directions the decoder renders as bursts between
+        the harmonics, stored in the checkpoint as ``prior_noise_subspace``.
+        Without the bursts the draw can use the usual 0.66666.
+        """
+        if basis is None:
+            self.prior_noise_subspace = None
+            return
+        self.prior_noise_subspace = basis.detach().float()
+        self.noise_scale = 0.66666
 
     def _remove_weight_norm_from(self, module):
         for hook in module._forward_pre_hooks.values():
@@ -268,13 +266,22 @@ class Synthesizer(torch.nn.Module):
         m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * self.noise_scale) * x_mask
 
+        m_kept = m_p
         if rate is not None:
             head = int(z_p.shape[2] * (1.0 - rate.item()))
             z_p, x_mask = z_p[:, :, head:], x_mask[:, :, head:]
+            m_kept = m_p[:, :, head:]
             if self.use_f0 and nsff0 is not None:
                 nsff0 = nsff0[:, head:]
 
         z = self.flow(z_p, x_mask, g=g, reverse=True)
+        basis = self.prior_noise_subspace
+        if basis is not None and self.noise_scale != 0:
+            z_mean = self.flow(m_kept * x_mask, x_mask, g=g, reverse=True)
+            delta = z - z_mean
+            basis = basis.to(device=delta.device, dtype=delta.dtype)
+            along = torch.einsum("ck,bkt->bct", basis, torch.einsum("ck,bct->bkt", basis, delta))
+            z = z_mean + delta - along
         o = (
             self.dec(z * x_mask, nsff0, g=g)
             if self.use_f0

@@ -1,8 +1,12 @@
+import math
 from typing import Sequence
 
 import numpy as np
 import torch
-import torchaudio
+from torchaudio.functional.functional import (
+    _apply_sinc_resample_kernel,
+    _get_sinc_resample_kernel,
+)
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
@@ -59,12 +63,9 @@ DEFAULT_UPSAMPLE_WIDTH = (12, 24, 32, 48)
 DEFAULT_UPSAMPLE_ROLLOFF = (0.90, 0.95, 0.97, 0.97)
 DEFAULT_UPSAMPLE_BETA = (6.0, 6.0, 6.0, 9.0)
 
-# The excitation gain is one channel, so its upsample chain is free whatever
-# the kernel length -- and it is the one path where an image is multiplied onto
-# every harmonic as a sideband. It gets the longest design at every stage.
-SOURCE_GAIN_WIDTH = 48
-SOURCE_GAIN_ROLLOFF = 0.97
-SOURCE_GAIN_BETA = 9.0
+# Frames the excitation gain reads from z. More than one, so the prior's
+# frame-independent draw is averaged before it modulates the source.
+SOURCE_GAIN_KERNEL = 5
 
 
 class ResBlock(nn.Module):
@@ -236,9 +237,9 @@ class SineGenerator(nn.Module):
     Sine + additive-noise harmonic excitation source.
 
     A source that fills the band flat -- the impulse train this replaced --
-    arrives unshaped wherever the trunk does not reach, because ``source_gain``
-    is one scalar per frame and can move the excitation's level but not its
-    tilt: +18 dB against the reference at 4.4-5 kHz, with the crossover exactly
+    arrived unshaped wherever the trunk does not reach, because ``source_gain``
+    was then one scalar per frame and could move the excitation's level but not
+    its tilt: +18 dB against the reference at 4.4-5 kHz, with the crossover exactly
     at the trunk's 3960 Hz ceiling. On a fixed trunk the sine measured better
     anyway: held-out multi-scale mel 1.9714 -> 1.7418 with ``source_gain`` on.
 
@@ -290,6 +291,7 @@ class SineGenerator(nn.Module):
         # Non-persistent: this module owns exactly one state-dict key, so the
         # tilt changes every partial's level while leaving the file untouched.
         orders = torch.arange(1, self.dim + 1, dtype=torch.float32)
+        self.register_buffer("harmonic_order", orders, persistent=False)
         self.register_buffer(
             "harmonic_gain",
             orders ** (-self.harmonic_tilt),
@@ -309,6 +311,13 @@ class SineGenerator(nn.Module):
         # linear fit at 1 partial, -53.8 at 32).
         nn.init.ones_(self.merge[0].weight)
 
+        # Octave band of each partial (1 | 2-3 | 4-7 | ...), so the source gain
+        # can shape the tilt with a handful of channels at any harmonic count.
+        band = torch.floor(torch.log2(orders)).long()
+        self.register_buffer("gain_band", band, persistent=False)
+        # Gain channels ``forward`` takes: one per octave band, then the noise.
+        self.gain_channels = int(band.max()) + 2
+
     def _f02uv(self, f0: torch.Tensor) -> torch.Tensor:
         return torch.ones_like(f0) * (f0 > self.voiced_threshold)
 
@@ -322,61 +331,85 @@ class SineGenerator(nn.Module):
         """
 
         nyquist = self.sampling_rate / 2.0
-        return ((nyquist - f0_buf) / (nyquist * self.NYQUIST_TAPER)).clamp(0.0, 1.0)
+        return (
+            (nyquist - f0_buf).div_(nyquist * self.NYQUIST_TAPER).clamp_(0.0, 1.0)
+        )
 
-    def _f02sine(self, f0_values: torch.Tensor) -> torch.Tensor:
-        """f0_values: (batch, length, dim), dim = fundamental + overtones."""
+    def _f02sine(self, f0: torch.Tensor) -> torch.Tensor:
+        """f0: (batch, length, 1). Returns (batch, length, dim) sines."""
 
         # F0 in rad mod 1; the integer cycle count doesn't affect phase.
-        rad_values = (f0_values / self.sampling_rate) % 1
+        rad_values = (f0 / self.sampling_rate) % 1
 
         # Random initial phase per harmonic, none for the fundamental.
-        rand_ini = torch.rand(
-            f0_values.shape[0], f0_values.shape[2], device=f0_values.device
-        )
+        rand_ini = torch.rand(f0.shape[0], self.dim, device=f0.device)
         rand_ini[:, 0] = 0
-        rad_values[:, 0, :] = rad_values[:, 0, :] + rand_ini
 
         tmp_over_one = torch.cumsum(rad_values, 1) % 1
         tmp_over_one_idx = (tmp_over_one[:, 1:, :] - tmp_over_one[:, :-1, :]) < 0
         cumsum_shift = torch.zeros_like(rad_values)
         cumsum_shift[:, 1:, :] = tmp_over_one_idx * -1.0
+        phase = torch.cumsum(rad_values + cumsum_shift, dim=1)
 
-        return torch.sin(torch.cumsum(rad_values + cumsum_shift, dim=1) * 2 * np.pi)
+        # Partial j's phase is j times the fundamental's (mod 1), so the
+        # cumsums run on one channel. In place after that: every temporary is
+        # a full (batch, length, dim) tensor.
+        phase = phase * self.harmonic_order
+        phase.add_(rand_ini.unsqueeze(1))
+
+        return phase.mul_(2).mul_(np.pi).sin_()
 
     # Inductor cannot compile the phase cumsum -- it lowers to a ``SplitScan``
     # whose codegen raises on torch 2.10, taking the whole decoder's compile
     # down with it. Everything up to ``merge`` is a pure function of f0 under
     # no_grad, so keeping it out of the graph costs no fusion.
     @torch.compiler.disable
-    def forward(self, f0: torch.Tensor) -> torch.Tensor:
-        """f0: (batch, length, 1) at the output rate. Returns (batch, length, 1)."""
+    def forward(
+        self, f0: torch.Tensor, gain: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        f0: (batch, length, 1) at the output rate. Returns (batch, length, 1).
+
+        gain: (batch, length, gain_channels) or None -- one gain per octave band
+        of partials, then one for the noise.
+        """
 
         with torch.no_grad():
-            f0_buf = torch.zeros(f0.shape[0], f0.shape[1], self.dim, device=f0.device)
-            f0_buf[:, :, 0] = f0[:, :, 0]
-            for idx in range(self.harmonic_num):
-                f0_buf[:, :, idx + 1] = f0_buf[:, :, 0] * (idx + 2)
+            f0_buf = f0 * self.harmonic_order
 
-            sine_waves = self._f02sine(f0_buf) * self.sine_amp
+            sine_waves = self._f02sine(f0).mul_(self.sine_amp)
             # Both are identity at ``harmonic_num = 0``: the gain is ``[1.0]``
             # and no fundamental sits within 10% of Nyquist.
-            sine_waves = sine_waves * self.harmonic_gain
-            sine_waves = sine_waves * self._nyquist_fade(f0_buf)
+            sine_waves.mul_(self.harmonic_gain)
+            sine_waves.mul_(self._nyquist_fade(f0_buf))
 
             uv = self._f02uv(f0)
 
             # Unvoiced regions are noise; voiced ones get a small dither.
-            # ``merge`` sums ``dim`` independent draws, so without the
-            # ``sqrt(dim)`` the dither the decoder receives would grow with the
-            # harmonic count and ``noise_std`` would stop meaning what it says.
             noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
-            noise = noise_amp * torch.randn_like(sine_waves) / self.dim**0.5
+            noise = noise_amp * torch.randn_like(uv)
 
-            sine_waves = sine_waves * uv + noise
+            sine_waves.mul_(uv)
 
         # Merged with grad: one learned scalar per partial.
-        return self.merge(sine_waves)
+        if gain is not None:
+            # No Tanh under a gain: a learned gain can push the sum into
+            # saturation, and saturating a harmonic sum at the output rate
+            # folds. ``index_select`` because advanced indexing backpropagates
+            # through a sort-based ``index_put_`` over every (sample, partial).
+            sine_waves = sine_waves * torch.index_select(gain, -1, self.gain_band)
+            noise = noise * gain[..., -1:]
+
+        if self.dim == 1:
+            merged = self.merge[0](sine_waves + noise)
+        else:
+            # ``merge`` over ``dim`` iid draws of std ``s / sqrt(dim)`` is one
+            # draw of std ``s * ||w|| / sqrt(dim)``, so one noise channel keeps
+            # ``noise_std`` meaning the same at any harmonic count.
+            noise_scale = self.merge[0].weight.norm() / self.dim**0.5
+            merged = self.merge[0](sine_waves) + noise * noise_scale
+
+        return merged if gain is not None else self.merge[1](merged)
 
 
 class RefineGAN2Generator(nn.Module):
@@ -403,8 +436,9 @@ class RefineGAN2Generator(nn.Module):
         filter_width (int | Sequence[int], optional): Interpolation filter length, scalar or one per stage.
         rolloff (float | Sequence[float], optional): Fraction of the stage's Nyquist the filter keeps.
         filter_beta (float | Sequence[float], optional): Kaiser beta for the interpolation filter.
-        source_gain (bool, optional): Scale the excitation by an intensity envelope
-            projected from the conditioning, as RefineGAN's paper does with the mel. Defaults to False.
+        source_gain (bool, optional): Scale the excitation by envelopes projected from
+            the conditioning and the speaker -- one per octave band of partials and one
+            for the noise -- as RefineGAN's paper does with the mel. Defaults to False.
         source_noise_std (float, optional): Dither the excitation carries in voiced
             frames. Defaults to 0.003.
         source_harmonics (int, optional): Partials above the fundamental in the
@@ -540,29 +574,40 @@ class RefineGAN2Generator(nn.Module):
         # this decoder is handed z, from which a least-squares fit recovers the
         # log intensity at r = 0.996. The sine carries no envelope of its own,
         # so this is worth having: held-out multi-scale mel on a fixed trunk
-        # improves 1.97 -> 1.74, for 193 parameters.
+        # improves 1.97 -> 1.74.
         self.has_source_gain = bool(source_gain)
         if self.has_source_gain:
-            self.source_gain = nn.Conv1d(num_mels, 1, 1)
+            gain_channels = self.m_source.gain_channels
+            self.source_gain = nn.Conv1d(
+                num_mels,
+                gain_channels,
+                SOURCE_GAIN_KERNEL,
+                padding=SOURCE_GAIN_KERNEL // 2,
+            )
             # Identity at initialisation (softplus(0.5413) = 1.0 with zero
             # weights), so switching this on starts from exactly the excitation
             # the run had before and the projection earns every departure.
             nn.init.zeros_(self.source_gain.weight)
             nn.init.constant_(self.source_gain.bias, 0.5413248546129181)
+            if gin_channels != 0:
+                # Zero as well, so the speaker term starts out adding nothing.
+                self.source_gain_cond = nn.Conv1d(gin_channels, gain_channels, 1)
+                nn.init.zeros_(self.source_gain_cond.weight)
+                nn.init.zeros_(self.source_gain_cond.bias)
 
             # The gain multiplies the excitation, so a residual image in it
-            # stamps a sideband onto every harmonic. This chain runs on
-            # (B, 1, T), where taps are free, so every stage gets the longest
-            # design rather than the trunk's schedule.
+            # stamps a sideband onto every harmonic. The trunk's schedule rather
+            # than its longest kernel everywhere: at width 48, stage 0 reaches 48
+            # frames each way, more than a 40-frame training segment.
             self.source_gain_ups = nn.ModuleList(
                 [
                     AntiAliasedUpsample1d(
                         rate,
-                        filter_width=SOURCE_GAIN_WIDTH,
-                        rolloff=SOURCE_GAIN_ROLLOFF,
-                        filter_beta=SOURCE_GAIN_BETA,
+                        filter_width=self.filter_width[stage],
+                        rolloff=self.rolloff[stage],
+                        filter_beta=self.filter_beta[stage],
                     )
-                    for rate in upsample_rates
+                    for stage, rate in enumerate(upsample_rates)
                 ]
             )
 
@@ -606,17 +651,31 @@ class RefineGAN2Generator(nn.Module):
     # torchaudio builds its sinc kernel from Python ints on every call, which
     # Inductor compiles to a CPU kernel and fails on Windows without cl.exe.
     # Kept out of the graph rather than replaced: this filter is what keeps
-    # each decimation from folding the harmonics it discards.
+    # each decimation from folding the harmonics it discards. The kernel is
+    # torchaudio's own, cached per reduced ratio instead of rebuilt per call.
     @torch.compiler.disable
     def _decimate(self, x: torch.Tensor, orig_freq: int, new_freq: int):
-        return torchaudio.functional.resample(
-            x.contiguous(),
-            orig_freq=orig_freq,
-            new_freq=new_freq,
-            lowpass_filter_width=64,
-            rolloff=0.9475937167399596,
-            resampling_method="sinc_interp_kaiser",
-            beta=14.769656459379492,
+        gcd = math.gcd(orig_freq, new_freq)
+        key = (orig_freq // gcd, new_freq // gcd, x.dtype, x.device)
+        cache = self.__dict__.setdefault("_decimate_kernels", {})
+        if key not in cache:
+            # Outside inference mode, or a kernel first built during eval
+            # cannot be saved for backward in the next training step.
+            with torch.inference_mode(False):
+                cache[key] = _get_sinc_resample_kernel(
+                    orig_freq,
+                    new_freq,
+                    gcd,
+                    lowpass_filter_width=64,
+                    rolloff=0.9475937167399596,
+                    resampling_method="sinc_interp_kaiser",
+                    beta=14.769656459379492,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+        kernel, width = cache[key]
+        return _apply_sinc_resample_kernel(
+            x.contiguous(), orig_freq, new_freq, gcd, kernel, width
         )
 
     @staticmethod
@@ -629,32 +688,38 @@ class RefineGAN2Generator(nn.Module):
         constant in cents instead. And interpolating across a voiced/unvoiced
         boundary ramps f0 toward zero while the gate stays open, which chirps
         every harmonic at once, so the gate is interpolated separately.
+
+        The log interpolation is normalised by the voiced mask: otherwise the
+        ``log 1 = 0`` of an unvoiced neighbour pulls the last half-frame before
+        every boundary toward 1 Hz while the gate still reads voiced.
         """
 
         voiced = (f0 > 0).to(f0.dtype)
-        # Interpolate the *pitch*, in log Hz, and the gate separately.
-        log_f0 = torch.log(f0.clamp_min(1.0))
+        log_f0 = torch.log(f0.clamp_min(1.0)) * voiced
+        weight = F.interpolate(voiced, size=length, mode="linear", align_corners=False)
         log_f0 = F.interpolate(log_f0, size=length, mode="linear", align_corners=False)
-        voiced = F.interpolate(voiced, size=length, mode="nearest")
-        return torch.exp(log_f0) * voiced
+        log_f0 = log_f0 / weight.clamp_min(1e-6)
+        gate = F.interpolate(voiced, size=length, mode="nearest")
+        return torch.exp(log_f0) * gate
 
-    def _apply_source_gain(self, har_source: torch.Tensor, mel: torch.Tensor):
+    def _source_gain(self, mel: torch.Tensor, g: torch.Tensor = None):
         """
-        Scale the excitation by an intensity envelope read off the
-        conditioning, which arrives at the frame rate as ``mel``.
+        The excitation gains, (batch, frames * upp, gain_channels), or None.
+
+        ``mel`` is the conditioning at the frame rate; ``g`` is the speaker
+        embedding.
         """
 
         if not self.has_source_gain:
-            return har_source
-        gain = F.softplus(self.source_gain(mel))
+            return None
+        gain = self.source_gain(mel)
+        if g is not None and hasattr(self, "source_gain_cond"):
+            gain = gain + self.source_gain_cond(g)
         for ups in self.source_gain_ups:
             gain = ups(gain)
-        length = har_source.shape[-1]
-        if gain.shape[-1] > length:
-            gain = gain[..., :length]
-        elif gain.shape[-1] < length:
-            gain = F.pad(gain, (0, length - gain.shape[-1]), mode="replicate")
-        return har_source * gain
+        # After the interpolation, not before: the sinc overshoots at onsets
+        # and would take a small positive gain below zero.
+        return F.softplus(gain).transpose(1, 2)
 
     def forward(self, mel: torch.Tensor, f0: torch.Tensor, g: torch.Tensor = None):
         f0_size = mel.shape[-1]
@@ -663,8 +728,8 @@ class RefineGAN2Generator(nn.Module):
         f0 = self._expand_f0(f0, f0_size * self.upp)
         # ``SineGenerator`` works in (batch, time, dim), where dim is the
         # harmonic axis; the trunk is channel-first throughout.
-        har_source = self.m_source(f0.transpose(1, 2)).transpose(1, 2)
-        har_source = self._apply_source_gain(har_source, mel)
+        gain = self._source_gain(mel, g)
+        har_source = self.m_source(f0.transpose(1, 2), gain).transpose(1, 2)
         x = self.pre_conv(har_source)
         downs = []
         for index, (block, (old_size, new_size)) in enumerate(

@@ -35,6 +35,7 @@ def extract_model(
     vocoder,
     pitch_guidance=True,
     version="v2",
+    prior_noise_subspace=None,
 ):
     try:
         model_dir = os.path.dirname(model_path)
@@ -98,6 +99,9 @@ def extract_model(
         opt["embedder_model"] = embedder_model
         opt["speakers_id"] = speakers_id
         opt["vocoder"] = vocoder
+        # Read by ``Synthesizer.set_prior_noise_subspace`` at inference.
+        if prior_noise_subspace is not None:
+            opt["prior_noise_subspace"] = prior_noise_subspace
 
         torch.save(
             replace_keys_in_dict(

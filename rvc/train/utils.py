@@ -124,7 +124,13 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, load_opt=1):
 
 
 def save_checkpoint(
-    model, optimizer, learning_rate, iteration, checkpoint_path, scaler
+    model,
+    optimizer,
+    learning_rate,
+    iteration,
+    checkpoint_path,
+    scaler,
+    prior_noise_subspace=None,
 ):
     """
     Save the model and optimizer state to a checkpoint file.
@@ -146,6 +152,8 @@ def save_checkpoint(
         "learning_rate": learning_rate,
         "scaler": scaler.state_dict(),
     }
+    if prior_noise_subspace is not None:
+        checkpoint_data["prior_noise_subspace"] = prior_noise_subspace
 
     # Create a backwards-compatible checkpoint
     torch.save(

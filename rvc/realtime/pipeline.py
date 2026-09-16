@@ -73,6 +73,7 @@ class RealtimeVoiceConverter:
             )
 
             self.net_g.load_state_dict(self.cpt["weight"], strict=False)
+            self.net_g.set_prior_noise_subspace(self.cpt.get("prior_noise_subspace"))
             strip_parametrizations(self.net_g)
             self.net_g = self.net_g.to(self.config.device).to(self.dtype)
             self.net_g.eval()

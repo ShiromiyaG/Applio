@@ -102,6 +102,8 @@ class MultiPeriodDiscriminator(torch.nn.Module):
 
         univhd = False
         san = False
+        msd = True
+        hann = False
         if version == "v1":
             periods = [2, 3, 5, 7, 11, 17]
             resolutions = []
@@ -126,23 +128,36 @@ class MultiPeriodDiscriminator(torch.nn.Module):
             # keys -- so offering it on v2/v3 would only be a way to make an
             # existing Applio discriminator unloadable.
             san = True
+            # No waveform (MSD) branch: the spectrogram branches already cover
+            # what it reads.  Dropping it shifts every branch index, so like
+            # SAN it is part of this layout rather than a switch.
+            msd = False
+            # Hann on the full-window spectrogram branches: a boxcar's -13 dB
+            # sidelobes fill the inter-harmonic valleys these branches read.
+            hann = True
         else:
             raise ValueError(f"Unknown discriminator version {version!r}.")
 
         self.version = version
         self.periods = list(periods)
+        self.use_msd = msd
         self.checkpointing = checkpointing
         #: Read by ``train.py`` to pick the loss form.  An attribute rather than
         #: a version comparison, so the two cannot disagree.
         self.supports_san = san
         self.discriminators = torch.nn.ModuleList(
-            [DiscriminatorS(use_spectral_norm=use_spectral_norm, use_san=san)]
+            ([DiscriminatorS(use_spectral_norm=use_spectral_norm, use_san=san)] if msd else [])
             + [
                 DiscriminatorP(p, use_spectral_norm=use_spectral_norm, use_san=san)
                 for p in periods
             ]
             + [
-                DiscriminatorR(r, use_spectral_norm=use_spectral_norm, use_san=san)
+                DiscriminatorR(
+                    r,
+                    use_spectral_norm=use_spectral_norm,
+                    use_san=san,
+                    hann_window=hann,
+                )
                 for r in resolutions
             ]
             + (
@@ -162,7 +177,7 @@ class MultiPeriodDiscriminator(torch.nn.Module):
         #: rather than at the call site so it cannot fall out of step with the
         #: assembly above: a list one entry short would weight the wrong heads.
         self.branch_weights = tuple(
-            [1.0] * (1 + len(periods) + len(resolutions))
+            [1.0] * (int(msd) + len(periods) + len(resolutions))
             + ([UNIVHD_WEIGHT] if univhd else [])
         )
 
@@ -300,7 +315,24 @@ class DiscriminatorP(torch.nn.Module):
 
 
 class DiscriminatorR(torch.nn.Module):
-    def __init__(self, resolution, use_spectral_norm=False, use_san=False):
+    """
+    Multi-resolution spectrogram discriminator.
+
+    Args:
+        resolution (list[int]): ``[n_fft, hop_length, win_length]``.
+        use_spectral_norm (bool, optional): Spectral instead of weight norm. Defaults to False.
+        use_san (bool, optional): SAN projection on ``conv_post``. Defaults to False.
+        hann_window (bool, optional): Hann window where ``win_length == n_fft``; the
+            short temporal window keeps the boxcar. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        resolution,
+        use_spectral_norm=False,
+        use_san=False,
+        hann_window=False,
+    ):
         super().__init__()
 
         self.resolution = resolution
@@ -361,6 +393,16 @@ class DiscriminatorR(torch.nn.Module):
             else norm_f(torch.nn.Conv2d(32, 1, (3, 3), padding=(1, 1)))
         )
 
+        # Non-persistent, so no checkpoint gains a key.
+        n_fft, _hop, win_length = self.resolution
+        self.register_buffer(
+            "window",
+            torch.hann_window(int(win_length))
+            if hann_window and int(win_length) == int(n_fft)
+            else torch.ones(int(win_length)),
+            persistent=False,
+        )
+
     def forward(self, x, san_training: bool = False):
         fmap = []
 
@@ -384,7 +426,7 @@ class DiscriminatorR(torch.nn.Module):
             n_fft=n_fft,
             hop_length=hop_length,
             win_length=win_length,
-            window=torch.ones(win_length, device=x.device),
+            window=self.window,
             center=False,
             return_complex=True,
         )

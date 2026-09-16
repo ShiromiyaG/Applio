@@ -46,6 +46,7 @@ from rvc.lib.algorithm import commons
 from rvc.lib.algorithm.san import normalize_san_weights
 from rvc.train.ema import WeightEMA
 from rvc.train.process.extract_model import extract_model
+from rvc.train.prior_subspace import estimate_prior_subspace, pick_clips
 
 # Parse command line arguments
 model_name = sys.argv[1]
@@ -613,6 +614,49 @@ def averaged_weights(ema, net_g):
     return ema.applied(net_g) if ema is not None else nullcontext()
 
 
+# Clips the burst-direction estimate reads, and the step it last ran at.
+_prior_subspace_clips = None
+_prior_subspace_step = None
+
+
+def refresh_prior_subspace(net_g, ema, global_step):
+    """
+    Estimate ``prior_noise_subspace`` on the averaged weights and set it on the model.
+
+    RefineGAN2 only, once per step, so the preview, the checkpoint and the
+    exported model share it. See ``rvc/train/prior_subspace.py``.
+
+    Returns:
+        The basis, or None if it could not be estimated.
+    """
+    global _prior_subspace_clips, _prior_subspace_step
+    if vocoder != "RefineGAN2":
+        return None
+    model = net_g.module if hasattr(net_g, "module") else net_g
+    if _prior_subspace_step == global_step:
+        return model.prior_noise_subspace
+    try:
+        if _prior_subspace_clips is None:
+            _prior_subspace_clips = pick_clips(config.data.training_files)
+        if not _prior_subspace_clips:
+            return None
+        with averaged_weights(ema, net_g):
+            basis, captured = estimate_prior_subspace(
+                model,
+                _prior_subspace_clips,
+                int(config.data.sample_rate),
+                int(config.data.hop_length),
+                max_frames=400,
+            )
+    except Exception as error:
+        print(f"Could not estimate prior_noise_subspace; saving without it: {error}")
+        return None
+    _prior_subspace_step = global_step
+    if basis is not None:
+        model.set_prior_noise_subspace(basis)
+    return basis
+
+
 def train_and_evaluate(
     rank,
     epoch,
@@ -925,6 +969,8 @@ def train_and_evaluate(
         }
 
         if epoch % save_every_epoch == 0:
+            # Outside no_grad: the estimate needs a gradient.
+            refresh_prior_subspace(net_g, ema, global_step)
             with torch.amp.autocast(
                 device_type="cuda", enabled=use_amp, dtype=train_dtype
             ):
@@ -970,6 +1016,7 @@ def train_and_evaluate(
         # Save weights every N epochs
         if epoch % save_every_epoch == 0:
             checkpoint_suffix = f"{2333333 if save_only_latest else global_step}.pth"
+            subspace_g = refresh_prior_subspace(net_g, ema, global_step)
             with averaged_weights(ema, net_g):
                 save_checkpoint(
                     net_g,
@@ -978,6 +1025,7 @@ def train_and_evaluate(
                     epoch,
                     os.path.join(experiment_dir, "G_" + checkpoint_suffix),
                     scaler,
+                    prior_noise_subspace=subspace_g,
                 )
             save_checkpoint(
                 net_d,
@@ -1016,6 +1064,7 @@ def train_and_evaluate(
             os.remove(m)
 
         if model_add:
+            subspace = refresh_prior_subspace(net_g, ema, global_step)
             with averaged_weights(ema, net_g):
                 ckpt = (
                     net_g.module.state_dict()
@@ -1033,6 +1082,7 @@ def train_and_evaluate(
                             step=global_step,
                             hps=hps,
                             vocoder=vocoder,
+                            prior_noise_subspace=subspace,
                         )
 
         if done:

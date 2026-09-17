@@ -26,13 +26,21 @@ def feature_loss(fmap_r, fmap_g, branch_weights=None):
     told not to believe.
 
     Args:
-        fmap_r (list of torch.Tensor): List of reference feature maps.
+        fmap_r (list of torch.Tensor): List of reference feature maps. A
+            tuple entry is one map split into bands, averaged jointly.
         fmap_g (list of torch.Tensor): List of generated feature maps.
         branch_weights (sequence of float, optional): One weight per branch, in
             the discriminator's own order. Defaults to None (all 1.0).
     """
+
+    def distance(rl, gl):
+        if isinstance(rl, tuple):
+            total = sum(torch.sum(torch.abs(r - g)) for r, g in zip(rl, gl))
+            return total / sum(r.numel() for r in rl)
+        return torch.mean(torch.abs(rl - gl))
+
     return 2 * sum(
-        _branch_weight(branch_weights, i) * torch.mean(torch.abs(rl - gl))
+        _branch_weight(branch_weights, i) * distance(rl, gl)
         for i, (dr, dg) in enumerate(zip(fmap_r, fmap_g))
         for rl, gl in zip(dr, dg)
     )

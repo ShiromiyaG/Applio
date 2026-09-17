@@ -412,8 +412,7 @@ def run(
         config.model.use_spectral_norm,
         checkpointing=checkpointing,
         version=disc_version,
-        # v3's periods are frequencies, so they are derived from the rate
-        # rather than reused from the 44.1 kHz set they were chosen at.
+        # Only v4's UnivHD reads the rate: its filterbank is in Hz.
         sample_rate=config.data.sample_rate,
     )
 

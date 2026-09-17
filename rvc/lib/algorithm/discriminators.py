@@ -1,5 +1,3 @@
-import math
-
 import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
@@ -11,55 +9,21 @@ from rvc.lib.algorithm.univhd import UnivHDDiscriminator
 from rvc.lib.algorithm.san import SANConv1d, SANConv2d, san_tail
 
 
-#: The rate ``v3``'s periods were chosen at, and the basis for ``v4``'s.  A period-``p`` branch folds
-#: onto a grid at ``sr / p`` Hz and its receptive field spans ``647 * p / sr``
-#: seconds, so both meanings of a period hold only if ``p`` scales with the
-#: rate.  Carrying the set unchanged empties the *slow* end -- at 32 kHz the
-#: longest branch drops from 323 ms to 222, and pitch structure lives there.
-REFERENCE_SAMPLE_RATE = 22050
+#: ``v4``'s periods.  Not rate-scaled: period 2 is the only branch that folds
+#: near Nyquist.
+V4_PERIODS = (2, 3, 5, 7, 11)
 
-#: ``v4``'s periods at the reference rate, before scaling.  This is ``v3``'s
-#: ``[2, 3, 5, 7, 11]`` without its longest: the spectrogram branches are the
-#: only part of this discriminator with resolution above 10 kHz, and a longer
-#: period folds at a lower rate, so it is the branch least able to say anything
-#: up there -- and it costs 8.2 M parameters, a fifth of the whole thing.
-V4_BASE_PERIODS = (2, 3, 5, 7)
-
-
-def rate_scaled_periods(periods, sample_rate, reference_rate=REFERENCE_SAMPLE_RATE):
-    """The period set that keeps the branches' time scales at another rate.
-
-    Targets are rounded to the nearest unused prime in log space -- prime
-    because two periods sharing a factor fold onto overlapping samples and
-    become one branch at two branches' cost, log because the quantity preserved
-    is a ratio.  ``reference_rate`` returns the input unchanged, which makes
-    this a derivation rather than a new design.
-
-    A period leaves no trace in a parameter shape, so a checkpoint trained with
-    one set loads into another without a murmur.
-    """
-
-    def is_prime(value):
-        return value > 1 and all(value % f for f in range(2, int(value**0.5) + 1))
-
-    candidates = [value for value in range(2, 512) if is_prime(value)]
-    used, scaled = set(), []
-    for period in periods:
-        target = int(period) * float(sample_rate) / float(reference_rate)
-        best = min(
-            (value for value in candidates if value not in used),
-            key=lambda value: abs(math.log(value / target)),
-        )
-        used.add(best)
-        scaled.append(best)
-    return tuple(sorted(scaled))
-
+#: Pre-emphasis on ``v4``'s period branches.  Off: at 0.97 periods 5, 7 and 11
+#: stayed near chance for 12k steps.
+V4_PRE_EMPHASIS = 0.0
 
 #: How much of the adversarial objective UnivHD is allowed to be on ``v4``.
 #:
-#: The paper's additive ``1.0`` is wrong for the branch set this version runs.
-#: On a 32 kHz pretrain with SAN on, ``mean(real logit) - mean(fake logit)``
-#: per branch between steps 2k and 8.5k put UnivHD at 5.1-7.7 against 0.2-2.1
+#: The paper's additive ``1.0`` was wrong for the branch set this version first
+#: ran (four rate-scaled periods, single-band spectrogram branches); it has not
+#: been re-measured on the current one.  On a 32 kHz pretrain with SAN on,
+#: ``mean(real logit) - mean(fake logit)`` per branch between steps 2k and 8.5k
+#: put UnivHD at 5.1-7.7 against 0.2-2.1
 #: for the other eight heads, and it stayed there rather than converging toward
 #: them.  The generator's term is ``(1 - dg)^2``, so a head separating by ~6
 #: contributes ~10x an average branch's: one of nine heads was most of
@@ -72,7 +36,7 @@ UNIVHD_WEIGHT = 0.15
 
 #: The three multi-resolution spectrogram branches.  The 512-point branch's
 #: 50-sample hop is what reads frame-rate modulation the other two average
-#: away.
+#: away.  On ``v4`` they are ``MultiBandDiscriminatorR``.
 V3_RESOLUTIONS = [[1024, 120, 600], [2048, 240, 1200], [512, 50, 240]]
 V4_RESOLUTIONS = [[1024, 120, 1024], [2048, 240, 2048], [512, 50, 240]]
 
@@ -104,6 +68,8 @@ class MultiPeriodDiscriminator(torch.nn.Module):
         san = False
         msd = True
         hann = False
+        multiband = False
+        pre_emphasis = 0.0
         if version == "v1":
             periods = [2, 3, 5, 7, 11, 17]
             resolutions = []
@@ -114,14 +80,16 @@ class MultiPeriodDiscriminator(torch.nn.Module):
             periods = [2, 3, 5, 7, 11]
             resolutions = V3_RESOLUTIONS
         elif version == "v4":
-            # RefineGAN2's discriminator: v3's periods scaled to the rate, its
-            # longest dropped, and the harmonic branch added.  UnivHD is 0.33 M
-            # parameters against this discriminator's 39 M and 8% of the step,
-            # and the paper reports it beating either branch family alone only
-            # when added to one rather than replacing it.
-            periods = rate_scaled_periods(V4_BASE_PERIODS, sample_rate)
+            # RefineGAN2's discriminator: v3's periods with pre-emphasis,
+            # multi-band spectrogram branches and the harmonic branch added.
+            # UnivHD is 0.33 M parameters and 8% of the step, and the paper
+            # reports it beating either branch family alone only when added to
+            # one rather than replacing it.
+            periods = V4_PERIODS
             resolutions = V4_RESOLUTIONS
             univhd = True
+            multiband = True
+            pre_emphasis = V4_PRE_EMPHASIS
             # SAN (arXiv 2301.12811) is part of this layout, not a switch on it.
             # It replaces every branch's last projection with a unit-norm
             # direction plus a scale, which changes ``conv_post``'s state-dict
@@ -148,11 +116,23 @@ class MultiPeriodDiscriminator(torch.nn.Module):
         self.discriminators = torch.nn.ModuleList(
             ([DiscriminatorS(use_spectral_norm=use_spectral_norm, use_san=san)] if msd else [])
             + [
-                DiscriminatorP(p, use_spectral_norm=use_spectral_norm, use_san=san)
+                DiscriminatorP(
+                    p,
+                    use_spectral_norm=use_spectral_norm,
+                    use_san=san,
+                    pre_emphasis=pre_emphasis,
+                )
                 for p in periods
             ]
             + [
-                DiscriminatorR(
+                MultiBandDiscriminatorR(
+                    r,
+                    use_spectral_norm=use_spectral_norm,
+                    use_san=san,
+                    frequency_strides=(1, 2, 2),
+                )
+                if multiband
+                else DiscriminatorR(
                     r,
                     use_spectral_norm=use_spectral_norm,
                     use_san=san,
@@ -245,6 +225,13 @@ class DiscriminatorS(torch.nn.Module):
         return san_tail(self, x, fmap, san_training)
 
 
+def pre_emphasize(x, coefficient):
+    """``x[t] - coefficient * x[t-1]``; 0 returns ``x`` unchanged."""
+    if not coefficient:
+        return x
+    return torch.cat((x[..., :1], x[..., 1:] - coefficient * x[..., :-1]), dim=-1)
+
+
 class DiscriminatorP(torch.nn.Module):
     """
     Discriminator for the long-term component.
@@ -259,6 +246,7 @@ class DiscriminatorP(torch.nn.Module):
         kernel_size (int): Kernel size of the convolutional layers. Defaults to 5.
         stride (int): Stride of the convolutional layers. Defaults to 3.
         use_spectral_norm (bool): Whether to use spectral normalization. Defaults to False.
+        pre_emphasis (float): Pre-emphasis coefficient on the input. Defaults to 0 (off).
     """
 
     def __init__(
@@ -268,9 +256,11 @@ class DiscriminatorP(torch.nn.Module):
         stride: int = 3,
         use_spectral_norm: bool = False,
         use_san: bool = False,
+        pre_emphasis: float = 0.0,
     ):
         super().__init__()
         self.period = period
+        self.pre_emphasis = float(pre_emphasis)
         norm_f = spectral_norm if use_spectral_norm else weight_norm
 
         in_channels = [1, 32, 128, 512, 1024]
@@ -302,6 +292,7 @@ class DiscriminatorP(torch.nn.Module):
 
     def forward(self, x, san_training: bool = False):
         fmap = []
+        x = pre_emphasize(x, self.pre_emphasis)
         b, c, t = x.shape
         if t % self.period != 0:
             n_pad = self.period - (t % self.period)
@@ -434,3 +425,119 @@ class DiscriminatorR(torch.nn.Module):
         mag = torch.norm(torch.view_as_real(x), p=2, dim=-1)  # [B, F, TT]
 
         return mag
+
+
+class MultiBandDiscriminatorR(torch.nn.Module):
+    """Spectrogram branch on a compressed complex STFT, one conv stack per band.
+
+    Three input channels: log magnitude, and the real and imaginary parts of
+    the STFT with its magnitude raised to ``compression`` (phase kept).  A
+    linear magnitude leaves the noise floor and the upper bands numerically
+    near zero, and has no phase at all.  The frequency axis is split into
+    ``BANDS`` (fractions of the bins), each with its own stack, as in DAC's
+    MRD, so the low band cannot claim every filter.
+
+    Args:
+        resolution (list[int]): ``[n_fft, hop_length, win_length]``.
+        channels (int, optional): Width of every band stack. Defaults to 32.
+        use_spectral_norm (bool, optional): Spectral instead of weight norm. Defaults to False.
+        use_san (bool, optional): SAN projection on ``conv_post``. Defaults to False.
+        compression (float, optional): Magnitude exponent. Defaults to 0.3.
+        frequency_strides (tuple[int], optional): Frequency stride of the three
+            strided layers. Defaults to (1, 1, 1).
+    """
+
+    BANDS = ((0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0))
+    # Power floor: keeps log and the compression gain finite in silence,
+    # about 94 dB under a full-scale sine at these magnitudes.
+    POWER_EPS = 1e-4
+
+    def __init__(
+        self,
+        resolution,
+        channels=32,
+        use_spectral_norm=False,
+        use_san=False,
+        compression=0.3,
+        frequency_strides=(1, 1, 1),
+    ):
+        super().__init__()
+        self.resolution = resolution
+        self.compression = float(compression)
+        self.lrelu_slope = 0.1
+        norm_f = spectral_norm if use_spectral_norm else weight_norm
+
+        n_fft, _hop, win_length = self.resolution
+        n_bins = int(n_fft) // 2 + 1
+        self.band_edges = tuple(
+            (int(round(lo * n_bins)), int(round(hi * n_bins))) for lo, hi in self.BANDS
+        )
+
+        def band_stack():
+            return torch.nn.ModuleList(
+                [norm_f(torch.nn.Conv2d(3, channels, (3, 9), padding=(1, 4)))]
+                + [
+                    norm_f(
+                        torch.nn.Conv2d(
+                            channels, channels, (3, 9), stride=(s, 2), padding=(1, 4)
+                        )
+                    )
+                    for s in frequency_strides
+                ]
+                + [norm_f(torch.nn.Conv2d(channels, channels, (3, 3), padding=(1, 1)))]
+            )
+
+        self.bands = torch.nn.ModuleList(band_stack() for _ in self.BANDS)
+        self.use_san = bool(use_san)
+        self.conv_post = (
+            SANConv2d(channels, 1, (3, 3), padding=(1, 1))
+            if self.use_san
+            else norm_f(torch.nn.Conv2d(channels, 1, (3, 3), padding=(1, 1)))
+        )
+        # Hann where the window spans the whole transform; the short temporal
+        # window keeps the boxcar.  Non-persistent, so no checkpoint gains a key.
+        self.register_buffer(
+            "window",
+            torch.hann_window(int(win_length))
+            if int(win_length) == int(n_fft)
+            else torch.ones(int(win_length)),
+            persistent=False,
+        )
+
+    def spectrogram(self, x):
+        n_fft, hop_length, win_length = self.resolution
+        pad = int((n_fft - hop_length) / 2)
+        x = F.pad(x, (pad, pad), mode="reflect").squeeze(1)
+        x = torch.stft(
+            x,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window=self.window,
+            center=False,
+            return_complex=True,
+        )
+        # Through the power rather than ``abs`` so the gradient stays finite
+        # at a zero bin.
+        power = x.real.square() + x.imag.square() + self.POWER_EPS
+        gain = power ** ((self.compression - 1.0) / 2.0)
+        return torch.stack(
+            (0.5 * torch.log(power), x.real * gain, x.imag * gain), dim=1
+        )
+
+    def forward(self, x, san_training: bool = False):
+        # Only the STFT leaves autocast; after compression the input is in the
+        # range the other branches see.
+        with torch.autocast(x.device.type, enabled=False):
+            x = self.spectrogram(x.float())
+        layers = [[] for _ in self.bands[0]]
+        for (lo, hi), stack in zip(self.band_edges, self.bands):
+            h = x[:, :, lo:hi]
+            for index, layer in enumerate(stack):
+                h = F.leaky_relu(layer(h), self.lrelu_slope)
+                layers[index].append(h)
+        # One entry per layer, a tuple of its band maps: ``feature_loss`` takes
+        # their joint mean, so the branch weighs what ``DiscriminatorR`` does
+        # without copying the activations into one tensor.
+        fmap = [tuple(maps) for maps in layers]
+        return san_tail(self, torch.cat(layers[-1], dim=2), fmap, san_training)

@@ -137,10 +137,13 @@ class ResBlock(nn.Module):
 
 class AdaIN(nn.Module):
     """
-    Noise-regularised activation, wrapped either side of every ResBlock.
+    RefineGAN's noise-injecting activation, wrapped either side of every ResBlock.
 
-    The noise is a training-time regulariser only; in eval this is a plain
-    Leaky ReLU.
+    The noise runs in eval too, as the paper's Figure 1 draws it. Skipping it
+    there is cheaper and costs the decoder the high-frequency floor it builds
+    out of it -- 3.1 dB of 8-13 kHz on one checkpoint -- which the
+    discriminator never asks for either, since it scores the noisy training
+    output.
 
     Args:
         channels (int): Number of channels.
@@ -160,10 +163,6 @@ class AdaIN(nn.Module):
         self.activation = nn.LeakyReLU(leaky_relu_slope)
 
     def forward(self, x: torch.Tensor):
-        # skipped in eval: it is a regulariser, and it is 25% of the forward
-        if not self.training:
-            return self.activation(x)
-
         gaussian = torch.randn_like(x) * self.weight[None, :, None]
 
         return self.activation(x + gaussian)
@@ -315,8 +314,13 @@ class SineGenerator(nn.Module):
         # can shape the tilt with a handful of channels at any harmonic count.
         band = torch.floor(torch.log2(orders)).long()
         self.register_buffer("gain_band", band, persistent=False)
+        # Noise gain channels: a first-order lowpass of the draw, the draw
+        # itself, and a first-order highpass of it, each with its own gain. One
+        # gain on white noise moves the floor as a block, and what the floor is
+        # short of is tilt -- too little above 8 kHz, too much below 1.5.
+        self.noise_gain_channels = 3
         # Gain channels ``forward`` takes: one per octave band, then the noise.
-        self.gain_channels = int(band.max()) + 2
+        self.gain_channels = int(band.max()) + 1 + self.noise_gain_channels
 
     def _f02uv(self, f0: torch.Tensor) -> torch.Tensor:
         return torch.ones_like(f0) * (f0 > self.voiced_threshold)
@@ -393,12 +397,21 @@ class SineGenerator(nn.Module):
 
         # Merged with grad: one learned scalar per partial.
         if gain is not None:
+            # Unit variance each, so a gain reads as a level rather than as a
+            # filter's own scale.
+            previous = F.pad(noise[:, :-1], (0, 0, 1, 0))
+            lowpass = (noise + previous) * 0.7071067811865476
+            highpass = (noise - previous) * 0.7071067811865476
             # No Tanh under a gain: a learned gain can push the sum into
             # saturation, and saturating a harmonic sum at the output rate
             # folds. ``index_select`` because advanced indexing backpropagates
             # through a sort-based ``index_put_`` over every (sample, partial).
             sine_waves = sine_waves * torch.index_select(gain, -1, self.gain_band)
-            noise = noise * gain[..., -1:]
+            noise = (
+                lowpass * gain[..., -3:-2]
+                + noise * gain[..., -2:-1]
+                + highpass * gain[..., -1:]
+            )
 
         if self.dim == 1:
             merged = self.merge[0](sine_waves + noise)
@@ -589,6 +602,11 @@ class RefineGAN2Generator(nn.Module):
             # the run had before and the projection earns every departure.
             nn.init.zeros_(self.source_gain.weight)
             nn.init.constant_(self.source_gain.bias, 0.5413248546129181)
+            # The two tilt channels start muted (softplus(-6) = 0.0025), so the
+            # excitation at initialisation is the white draw it always was.
+            with torch.no_grad():
+                self.source_gain.bias[-3] = -6.0
+                self.source_gain.bias[-1] = -6.0
             if gin_channels != 0:
                 # Zero as well, so the speaker term starts out adding nothing.
                 self.source_gain_cond = nn.Conv1d(gin_channels, gain_channels, 1)

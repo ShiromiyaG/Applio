@@ -626,7 +626,8 @@ def refresh_prior_subspace(net_g, ema, global_step):
     exported model share it. See ``rvc/train/prior_subspace.py``.
 
     Returns:
-        The basis, or None if it could not be estimated.
+        The basis. The last one estimated when the device has no room for a new
+        one, since the directions drift slowly, or None if there has been none.
     """
     global _prior_subspace_clips, _prior_subspace_step
     if vocoder != "RefineGAN2":
@@ -639,6 +640,10 @@ def refresh_prior_subspace(net_g, ema, global_step):
             _prior_subspace_clips = pick_clips(config.data.training_files)
         if not _prior_subspace_clips:
             return None
+        # The training step's cached blocks are reserved in shapes the estimate
+        # cannot reuse.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         with averaged_weights(ema, net_g):
             basis, captured = estimate_prior_subspace(
                 model,
@@ -651,8 +656,9 @@ def refresh_prior_subspace(net_g, ema, global_step):
         print(f"Could not estimate prior_noise_subspace; saving without it: {error}")
         return None
     _prior_subspace_step = global_step
-    if basis is not None:
-        model.set_prior_noise_subspace(basis)
+    if basis is None:
+        return model.prior_noise_subspace
+    model.set_prior_noise_subspace(basis)
     return basis
 
 

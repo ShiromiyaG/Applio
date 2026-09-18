@@ -10,7 +10,10 @@ from torchaudio.functional.functional import (
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
-from torch.nn.utils.parametrize import remove_parametrizations
+from torch.nn.utils.parametrize import (
+    register_parametrization,
+    remove_parametrizations,
+)
 from torch.utils.checkpoint import checkpoint
 
 from rvc.lib.algorithm.commons import init_weights, get_padding
@@ -66,6 +69,28 @@ DEFAULT_UPSAMPLE_BETA = (6.0, 6.0, 6.0, 9.0)
 # Frames the excitation gain reads from z. More than one, so the prior's
 # frame-independent draw is averaged before it modulates the source.
 SOURCE_GAIN_KERNEL = 5
+
+
+class UnitNorm(nn.Module):
+    """
+    Weight norm without the gain: every output channel's filter at unit norm.
+
+    Parametrizes ``conv_post``. Under ``weight_norm`` that layer's gain is one
+    scalar between the whole trunk and the tanh, behind nothing but Leaky
+    ReLUs, so the loss only sees its product with the trunk's scale. Adam grows
+    the plain ``input_conv`` weights by random walk (about
+    ``lr * sqrt(fan_in * steps)`` per row), four stages multiply that, and the
+    gain shrinks to compensate: 0.574 -> 2.9e-4 over a 98k-step 32 kHz
+    pretrain, with that one scalar carrying 99.9% of the generator's gradient
+    norm (~14k) and an FP16 finetune of it going to NaN. With the norm fixed,
+    the trunk's last features are the output's amplitude and the loss pins
+    their scale.
+    """
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        return weight / torch.linalg.vector_norm(
+            weight, dim=tuple(range(1, weight.dim())), keepdim=True
+        )
 
 
 class ResBlock(nn.Module):
@@ -433,9 +458,10 @@ class RefineGAN2Generator(nn.Module):
     upsamples through parallel residual blocks. Against the original: a
     tilted harmonic sine instead of the truncated-sinc comb, descending stage
     rates, a windowed-sinc interpolation filter that crops its own group delay, an
-    excitation gain projected from the conditioning, and f0 interpolated in log
-    with a hard voiced/unvoiced gate. Every pointwise nonlinearity is a plain
-    Leaky ReLU at its own rate.
+    excitation gain projected from the conditioning, f0 interpolated in log
+    with a hard voiced/unvoiced gate, and an output projection with no learned
+    gain (``UnitNorm``). Every pointwise nonlinearity is a plain Leaky ReLU at
+    its own rate.
 
     Args:
         sample_rate (int, optional): Sampling rate of the audio. Defaults to 32000.
@@ -659,10 +685,11 @@ class RefineGAN2Generator(nn.Module):
 
             channels = new_channels
 
-        self.conv_post = weight_norm(
-            nn.Conv1d(channels, 1, 7, 1, padding=3, bias=False)
-        )
-        self.conv_post.apply(init_weights)
+        # Unit-norm, not weight norm: see ``UnitNorm``. Only the direction is
+        # learned, so there is nothing for ``init_weights`` to set -- which it
+        # never did on a parametrized conv anyway.
+        self.conv_post = nn.Conv1d(channels, 1, 7, 1, padding=3, bias=False)
+        register_parametrization(self.conv_post, "weight", UnitNorm())
 
         self.out_tanh = nn.Tanh()
 
@@ -789,7 +816,8 @@ class RefineGAN2Generator(nn.Module):
 
     def remove_weight_norm(self) -> None:
         """
-        Fold every weight norm back into its weight, by walking the modules
+        Fold every weight parametrization -- the weight norms and
+        ``conv_post``'s ``UnitNorm`` -- into its weight, by walking the modules
         rather than listing them by name.
         """
 

@@ -86,22 +86,24 @@ class AntiAliasedUpsample1d(nn.Module):
 
         # Everything the polyphase forward needs about padding is a constant,
         # so it is computed here rather than from ``x.shape[-1]``: under
-        # torch.compile the latter makes the pad widths symbolic and the branch
-        # on them data-dependent. The length cancels out of the right-hand pad.
+        # torch.compile the latter makes the pad widths symbolic.
+        #
+        # ``lowpass_kernel`` is ``2 * width * factor + 1`` taps, which puts
+        # ``pad_left`` on a multiple of ``factor``: every phase then starts on
+        # the same input sample, so the phases interleave with one reshape.
         taps = -(-kernel_size // self.factor)
         whole, offset = divmod(self.pad_left, self.factor)
-        shifts = tuple(
-            whole + (1 if phase + offset >= self.factor else 0)
-            for phase in range(self.factor)
-        )
+        if offset:
+            raise ValueError(
+                f"A {kernel_size}-tap kernel at x{self.factor} puts the phases "
+                f"on different input samples; the polyphase form needs them "
+                f"aligned."
+            )
         self.taps = taps
-        self.shifts = shifts
-        self.phase_offset = offset
-        self.extra_left = max(0, taps - 1 - min(shifts))
-        self.extra_right = max(0, max(shifts) - 2 * self.pad - 1)
-        self.starts = tuple(
-            self.extra_left + shift - taps + 1 for shift in shifts
-        )
+        # Replicate padding for exactly ``length`` outputs per phase: output
+        # ``n`` reads inputs ``n - left`` through ``n + right``.
+        left = self.pad - whole + taps - 1
+        self.phase_pad = (left, taps - 1 - left)
 
     def _polyphase(self, x: Tensor):
         """
@@ -121,8 +123,7 @@ class AntiAliasedUpsample1d(nn.Module):
             taps = self.taps
             weight = kernel.new_zeros(self.factor, 1, taps)
             for phase in range(self.factor):
-                index = (phase + self.phase_offset) % self.factor
-                part = kernel[index :: self.factor]
+                part = kernel[phase :: self.factor]
                 # A phase shorter than ``taps`` is right-aligned; left-aligning
                 # it shifts that one phase by a sample.
                 weight[phase, 0, taps - part.numel() :] = part.flip(-1)
@@ -170,22 +171,17 @@ class AntiAliasedUpsample1d(nn.Module):
         batch, channels, length = x.shape[0], x.shape[1], x.shape[-1]
         weight = self._polyphase(x)
 
-        # The same replicate pad the transposed form uses: the extra input
-        # sample on the right is what makes the output reach ``length * factor``,
-        # and replicating keeps the filter from inventing an edge.
-        padded = F.pad(
-            x,
-            (self.pad + self.extra_left, self.pad + 1 + self.extra_right),
-            mode="replicate",
-        )
+        # Replicate, as the transposed form pads, which keeps the filter from
+        # inventing an edge. Only as far as the taps read, so no phase output
+        # is computed and then cropped.
+        padded = F.pad(x, self.phase_pad, mode="replicate")
         phases = F.conv1d(padded, weight, groups=channels)
-        phases = phases.view(batch, channels, self.factor, -1)
-        out = x.new_empty(batch, channels, length * self.factor)
-        for phase, start in enumerate(self.starts):
-            out[..., phase :: self.factor] = phases[
-                :, :, phase, start : start + length
-            ]
-        return out
+        # One coalesced copy instead of ``factor`` strided ones.
+        return (
+            phases.view(batch, channels, self.factor, length)
+            .transpose(2, 3)
+            .reshape(batch, channels, length * self.factor)
+        )
 
 
 def filter_schedule(

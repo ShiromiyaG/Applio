@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 from typing import Sequence
 
 import numpy as np
@@ -150,10 +151,14 @@ class ResBlock(nn.Module):
         self.convs2.apply(init_weights)
 
     def forward(self, x: torch.Tensor):
+        # Under autocast, an FP32 stream keeps an update smaller than the low
+        # precision's rounding step (or past FP16's range) from being lost.
+        if torch.is_autocast_enabled(x.device.type):
+            x = x.float()
         for c1, c2 in zip(self.convs1, self.convs2):
             xt = F.leaky_relu(x, self.leaky_relu_slope)
             # In place on the conv's own output, so autograd saves one tensor
-            # here instead of two.
+            # here instead of two. The residual add stays out of place.
             xt = F.leaky_relu(c1(xt), self.leaky_relu_slope, inplace=True)
             xt = c2(xt)
             x = xt + x
@@ -708,6 +713,20 @@ class RefineGAN2Generator(nn.Module):
 
         self.out_tanh = nn.Tanh()
 
+    # Under autocast, the excitation, the upsampling filters and the output
+    # layer run in FP32; ``amp`` is whether autocast was on at the call.
+    @staticmethod
+    def _fp32_region(x: torch.Tensor, amp: bool):
+        return torch.autocast(x.device.type, enabled=False) if amp else nullcontext()
+
+    @staticmethod
+    def _fp32(x: torch.Tensor, amp: bool) -> torch.Tensor:
+        return x.float() if amp else x
+
+    def _upsample(self, ups: nn.Module, x: torch.Tensor, amp: bool) -> torch.Tensor:
+        with self._fp32_region(x, amp):
+            return ups(self._fp32(x, amp))
+
     # torchaudio builds its sinc kernel from Python ints on every call, which
     # Inductor compiles to a CPU kernel and fails on Windows without cl.exe.
     # Kept out of the graph rather than replaced: this filter is what keeps
@@ -788,9 +807,15 @@ class RefineGAN2Generator(nn.Module):
         f0 = self._expand_f0(f0, f0_size * self.upp)
         # ``SineGenerator`` works in (batch, time, dim), where dim is the
         # harmonic axis; the trunk is channel-first throughout.
-        gain = self._source_gain(mel, g)
-        har_source = self.m_source(f0.transpose(1, 2), gain).transpose(1, 2)
-        x = self.pre_conv(har_source)
+        # The sine carries phase in its low-order bits, so it stays out of low
+        # precision until the first conv has turned it into features.
+        amp = torch.is_autocast_enabled(mel.device.type)
+        with self._fp32_region(mel, amp):
+            gain = self._source_gain(
+                self._fp32(mel, amp), None if g is None else self._fp32(g, amp)
+            )
+            har_source = self.m_source(f0.transpose(1, 2), gain).transpose(1, 2)
+            x = self.pre_conv(har_source)
         downs = []
         for index, (block, (old_size, new_size)) in enumerate(
             zip(self.downsample_blocks, self.df0)
@@ -813,19 +838,20 @@ class RefineGAN2Generator(nn.Module):
             reversed(downs),
         ):
             if self.training and self.checkpointing:
-                x = checkpoint(ups, x, use_reentrant=False)
+                x = checkpoint(self._upsample, ups, x, amp, use_reentrant=False)
                 x = F.leaky_relu(x, self.leaky_relu_slope)
                 x = torch.cat([x, down], dim=1)
                 x = checkpoint(res, x, use_reentrant=False)
             else:
-                x = ups(x)
+                x = self._upsample(ups, x, amp)
                 x = F.leaky_relu(x, self.leaky_relu_slope)
                 x = torch.cat([x, down], dim=1)
                 x = res(x)
 
-        x = F.leaky_relu(x, self.leaky_relu_slope)
-        x = self.conv_post(x)
-        x = self.out_tanh(x)
+        with self._fp32_region(x, amp):
+            x = F.leaky_relu(self._fp32(x, amp), self.leaky_relu_slope)
+            x = self.conv_post(x)
+            x = self.out_tanh(x)
 
         return x
 
